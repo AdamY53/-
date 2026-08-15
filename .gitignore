@@ -1,0 +1,46 @@
+# Keil build outputs and generated listings
+/Objects/
+/Listings/
+*.axf
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.crf
+*.d
+*.o
+*.dep
+*.iex
+*.lnp
+*.sct
+*.htm
+*.log
+
+# Keil per-user IDE and debugger settings
+*.uvoptx
+*.uvguix*
+/DebugConfig/
+
+# Probe/debug tool state
+JLinkLog.txt
+JLinkSettings.ini
+
+# Generated Event Recorder stub
+EventRecorderStub.scvd
+
+# Local archives, editor/OS metadata, and scratch files
+*.bak
+*.bak.*
+*.tmp
+*.swp
+Thumbs.db
+.DS_Store
+
+# Archived/removed source snapshots
+/_removed_unused/
+
+# Timestamped source snapshots kept for local rollback
+**/*_20[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_before*.*
+**/*before*.*
+
