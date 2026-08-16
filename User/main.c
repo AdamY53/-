@@ -1,0 +1,520 @@
+#include "stm32f10x.h"
+#include "Delay.h"
+#include "OLED.h"
+#include "Key.h"
+#include "Motor.h"
+#include "Encoder.h"
+#include "Grayscale.h"
+#include "Ultrasonic.h"
+
+/* Line tracking tuning. Normal tracking keeps both motors forward. */
+#define CAR_BASE_PWM               36.0f
+#define CAR_LINE_KP                0.090f
+#define CAR_LINE_KD                0.180f
+#define CAR_ENCODER_BALANCE_KP     0.350f
+#define CAR_STEER_LIMIT            26.0f
+#define CAR_BALANCE_LIMIT          8.0f
+#define CAR_MIN_FORWARD_PWM        10.0f
+#define CAR_PWM_LIMIT              70.0f
+
+/* 可调窗口：90度拐点需要连续确认的周期数，每个周期约 20ms，数值越大越不容易误触发。 */
+#define CAR_SHARP_CONFIRM_TICKS    2
+/* 可调窗口：M+左侧三路或 M+右侧三路中至少几个高电平才允许触发90度转弯。 */
+#define CAR_SHARP_GROUP_ACTIVE_MIN 3
+/* 可调窗口：检测到直角弯后先直行的编码器累计值，参考 OLED 调试页 C 数值调整。 */
+#define CAR_TURN_ENTRY_FORWARD_COUNT 120
+/* 可调窗口：直行累计值接近目标值的允许误差，数值越大越早进入转弯。 */
+#define CAR_TURN_ENTRY_COUNT_WINDOW  8
+/* 可调窗口：编码器异常时最多直行周期数，每个周期约 20ms，防止一直直行。 */
+#define CAR_TURN_ENTRY_MAX_TICKS     20
+/* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
+#define CAR_FIXED_TURN_PWM           34
+/* 可调窗口：方案一固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
+#define CAR_FIXED_TURN_TICKS         12
+/* 可调窗口：每次完成90度转弯后的屏蔽周期数，屏蔽期内不再次触发90度转弯。 */
+#define CAR_TURN_COOLDOWN_TICKS      20
+#define ULTRASONIC_SAMPLE_TICKS    3
+
+#define DISPLAY_PAGE_LINE          0
+#define DISPLAY_PAGE_ULTRASONIC    1
+
+#define CAR_LINE_STATE_FOLLOW      0
+#define CAR_LINE_STATE_APPROACH    1
+#define CAR_LINE_STATE_FIXED_TURN  2
+
+#define CAR_TURN_NONE              0
+#define CAR_TURN_LEFT              1
+#define CAR_TURN_RIGHT             2
+
+static uint8_t Car_Running = 0;
+static uint8_t Display_Page = DISPLAY_PAGE_ULTRASONIC;
+
+static uint16_t Front_Distance = US_INVALID_DISTANCE_CM;
+static uint16_t Left_Distance = US_INVALID_DISTANCE_CM;
+static uint16_t Right_Distance = US_INVALID_DISTANCE_CM;
+static uint8_t Ultrasonic_Index = 0;
+
+static int16_t Encoder_Right = 0;
+static int16_t Encoder_Left = 0;
+static int32_t Encoder_Right_Total = 0;
+static int32_t Encoder_Left_Total = 0;
+
+static int16_t Line_Error = 0;
+static int16_t Line_Last_Error = 0;
+static int16_t Line_Derivative = 0;
+static int8_t Line_Steer_PWM = 0;
+static int8_t Encoder_Balance_PWM = 0;
+static int8_t PWM_Right = 0;
+static int8_t PWM_Left = 0;
+
+static uint8_t Line_State = CAR_LINE_STATE_FOLLOW;
+static uint8_t Turn_Direction = CAR_TURN_NONE;
+static uint8_t Turn_Tick = 0;
+static uint16_t Turn_Forward_Count = 0;
+static uint16_t Turn_Last_Forward_Count = 0;
+static uint8_t Turn_Cooldown_Tick = 0;
+static uint8_t Sharp_Left_Count = 0;
+static uint8_t Sharp_Right_Count = 0;
+static char Line_Mode = 'F';
+
+static float LimitFloat(float Value, float Min, float Max)
+{
+	if (Value > Max) {return Max;}
+	if (Value < Min) {return Min;}
+	return Value;
+}
+
+static uint8_t LimitForwardPWM(float Value)
+{
+	if (Value > CAR_PWM_LIMIT) {return (uint8_t)CAR_PWM_LIMIT;}
+	if (Value < CAR_MIN_FORWARD_PWM) {return (uint8_t)CAR_MIN_FORWARD_PWM;}
+	return (uint8_t)Value;
+}
+
+static int8_t LimitSignedPWM(int16_t Value)
+{
+	if (Value > 100) {return 100;}
+	if (Value < -100) {return -100;}
+	return (int8_t)Value;
+}
+
+static uint16_t AbsEncoderCount(int16_t Value)
+{
+	int32_t Temp = Value;
+
+	if (Temp < 0)
+	{
+		Temp = -Temp;
+	}
+	if (Temp > 65535)
+	{
+		return 65535;
+	}
+	return (uint16_t)Temp;
+}
+
+static void Car_SetForwardPWM(float LeftPWM, float RightPWM)
+{
+	PWM_Left = (int8_t)LimitForwardPWM(LeftPWM);
+	PWM_Right = (int8_t)LimitForwardPWM(RightPWM);
+	Motor_SetPWM(MOTOR_LEFT, (int8_t)PWM_Left);
+	Motor_SetPWM(MOTOR_RIGHT, (int8_t)PWM_Right);
+}
+
+static void Car_SetSignedPWM(int16_t LeftPWM, int16_t RightPWM)
+{
+	PWM_Left = LimitSignedPWM(LeftPWM);
+	PWM_Right = LimitSignedPWM(RightPWM);
+	Motor_SetPWM(MOTOR_LEFT, PWM_Left);
+	Motor_SetPWM(MOTOR_RIGHT, PWM_Right);
+}
+
+static void Car_Stop(void)
+{
+	PWM_Left = 0;
+	PWM_Right = 0;
+	Motor_Stop();
+}
+
+static void Car_ClearLinePD(void)
+{
+	Line_Error = 0;
+	Line_Last_Error = 0;
+	Line_Derivative = 0;
+	Line_Steer_PWM = 0;
+	Encoder_Balance_PWM = 0;
+}
+
+static void Car_ResetLineController(void)
+{
+	Car_ClearLinePD();
+	Line_State = CAR_LINE_STATE_FOLLOW;
+	Turn_Direction = CAR_TURN_NONE;
+	Turn_Tick = 0;
+	Turn_Forward_Count = 0;
+	Turn_Cooldown_Tick = 0;
+	Sharp_Left_Count = 0;
+	Sharp_Right_Count = 0;
+	Line_Mode = 'F';
+}
+
+static void Car_UpdateEncoders(void)
+{
+	Encoder_Right = Encoder1_Get();
+	Encoder_Left = Encoder2_Get();
+	Encoder_Right_Total += Encoder_Right;
+	Encoder_Left_Total += Encoder_Left;
+}
+
+static void Car_ResetEncoderTotals(void)
+{
+	Encoder_Right_Total = 0;
+	Encoder_Left_Total = 0;
+	Turn_Last_Forward_Count = 0;
+}
+
+static void Car_UpdateUltrasonicOneStep(void)
+{
+	if (Ultrasonic_Index == 0)
+	{
+		Front_Distance = Ultrasonic_GetDistanceCm(US_CH_FRONT);
+	}
+	else if (Ultrasonic_Index == 1)
+	{
+		Left_Distance = Ultrasonic_GetDistanceCm(US_CH_LEFT);
+	}
+	else
+	{
+		Right_Distance = Ultrasonic_GetDistanceCm(US_CH_RIGHT);
+	}
+
+	Ultrasonic_Index++;
+	if (Ultrasonic_Index >= 3)
+	{
+		Ultrasonic_Index = 0;
+	}
+}
+
+static int16_t Car_CalcLineError(void)
+{
+	int16_t PositionSum;
+
+	if (Gray_ActiveCount == 0)
+	{
+		return 0;
+	}
+
+	PositionSum = Gray_Sensor[GRAY_IDX_L3] * (-300)
+	            + Gray_Sensor[GRAY_IDX_L2] * (-200)
+	            + Gray_Sensor[GRAY_IDX_L1] * (-100)
+	            + Gray_Sensor[GRAY_IDX_M]  * 0
+	            + Gray_Sensor[GRAY_IDX_R1] * 100
+	            + Gray_Sensor[GRAY_IDX_R2] * 200
+	            + Gray_Sensor[GRAY_IDX_R3] * 300;
+
+	return PositionSum / Gray_ActiveCount;
+}
+
+static uint8_t Car_CountLeftTurnSensors(void)
+{
+	return Gray_Sensor[GRAY_IDX_L3]
+	     + Gray_Sensor[GRAY_IDX_L2]
+	     + Gray_Sensor[GRAY_IDX_L1]
+	     + Gray_Sensor[GRAY_IDX_M];
+}
+
+static uint8_t Car_CountRightTurnSensors(void)
+{
+	return Gray_Sensor[GRAY_IDX_R1]
+	     + Gray_Sensor[GRAY_IDX_R2]
+	     + Gray_Sensor[GRAY_IDX_R3]
+	     + Gray_Sensor[GRAY_IDX_M];
+}
+
+static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
+{
+	if (Direction == CAR_TURN_LEFT)
+	{
+		Car_SetSignedPWM(-(int16_t)Speed, Speed);
+	}
+	else if (Direction == CAR_TURN_RIGHT)
+	{
+		Car_SetSignedPWM(Speed, -(int16_t)Speed);
+	}
+}
+
+static void Car_StartSharpTurn(uint8_t Direction)
+{
+	Car_ClearLinePD();
+	Line_State = CAR_LINE_STATE_APPROACH;
+	Turn_Direction = Direction;
+	Turn_Tick = 0;
+	Turn_Forward_Count = 0;
+	Turn_Cooldown_Tick = 0;
+	Sharp_Left_Count = 0;
+	Sharp_Right_Count = 0;
+	Line_Mode = (Direction == CAR_TURN_LEFT) ? 'L' : 'R';
+}
+
+static void Car_FinishSharpTurn(void)
+{
+	Turn_Last_Forward_Count = Turn_Forward_Count;
+	Car_ResetLineController();
+	Turn_Cooldown_Tick = CAR_TURN_COOLDOWN_TICKS;
+	Line_Mode = 'K';
+}
+
+static uint8_t Car_UpdateSharpTurnDetect(void)
+{
+	uint8_t LeftCount = Car_CountLeftTurnSensors();
+	uint8_t RightCount = Car_CountRightTurnSensors();
+
+	if ((LeftCount >= CAR_SHARP_GROUP_ACTIVE_MIN) && (RightCount < CAR_SHARP_GROUP_ACTIVE_MIN))
+	{
+		Sharp_Left_Count++;
+		Sharp_Right_Count = 0;
+		if (Sharp_Left_Count >= CAR_SHARP_CONFIRM_TICKS)
+		{
+			Car_StartSharpTurn(CAR_TURN_LEFT);
+			return 1;
+		}
+	}
+	else if ((RightCount >= CAR_SHARP_GROUP_ACTIVE_MIN) && (LeftCount < CAR_SHARP_GROUP_ACTIVE_MIN))
+	{
+		Sharp_Right_Count++;
+		Sharp_Left_Count = 0;
+		if (Sharp_Right_Count >= CAR_SHARP_CONFIRM_TICKS)
+		{
+			Car_StartSharpTurn(CAR_TURN_RIGHT);
+			return 1;
+		}
+	}
+	else
+	{
+		Sharp_Left_Count = 0;
+		Sharp_Right_Count = 0;
+	}
+
+	return 0;
+}
+
+static void Car_RunSharpTurn(void)
+{
+	Turn_Tick++;
+
+	if (Line_State == CAR_LINE_STATE_APPROACH)
+	{
+		Turn_Forward_Count += (AbsEncoderCount(Encoder_Left) + AbsEncoderCount(Encoder_Right)) / 2;
+		Line_Mode = 'A';
+		Car_SetForwardPWM(CAR_BASE_PWM, CAR_BASE_PWM);
+		if (((Turn_Forward_Count + CAR_TURN_ENTRY_COUNT_WINDOW) >= CAR_TURN_ENTRY_FORWARD_COUNT)
+		 || (Turn_Tick >= CAR_TURN_ENTRY_MAX_TICKS))
+		{
+			Turn_Last_Forward_Count = Turn_Forward_Count;
+			Turn_Tick = 0;
+			Line_State = CAR_LINE_STATE_FIXED_TURN;
+		}
+		return;
+	}
+
+	Line_Mode = (Turn_Direction == CAR_TURN_LEFT) ? 'L' : 'R';
+	Car_SetTurnPWM(Turn_Direction, CAR_FIXED_TURN_PWM);
+	if (Turn_Tick >= CAR_FIXED_TURN_TICKS)
+	{
+		Car_FinishSharpTurn();
+	}
+}
+
+static void Car_LineFollowStraight(void)
+{
+	float Steer;
+	float Balance;
+	float LeftPWM;
+	float RightPWM;
+	int16_t SpeedDiff;
+
+	Grayscale_Tick();
+
+	if (Line_State != CAR_LINE_STATE_FOLLOW)
+	{
+		Car_RunSharpTurn();
+		return;
+	}
+
+	if (Gray_ActiveCount == 0)
+	{
+		Car_ResetLineController();
+		Car_Stop();
+		return;
+	}
+
+	if (Turn_Cooldown_Tick > 0)
+	{
+		Turn_Cooldown_Tick--;
+		Sharp_Left_Count = 0;
+		Sharp_Right_Count = 0;
+	}
+	else if (Car_UpdateSharpTurnDetect())
+	{
+		Car_RunSharpTurn();
+		return;
+	}
+
+	Line_Error = Car_CalcLineError();
+	Line_Derivative = Line_Error - Line_Last_Error;
+	Line_Last_Error = Line_Error;
+	Line_Mode = (Turn_Cooldown_Tick > 0) ? 'K' : 'F';
+
+	Steer = (float)Line_Error * CAR_LINE_KP
+	      + (float)Line_Derivative * CAR_LINE_KD;
+	Steer = LimitFloat(Steer, -CAR_STEER_LIMIT, CAR_STEER_LIMIT);
+
+	SpeedDiff = Encoder_Left - Encoder_Right;
+	Balance = (float)SpeedDiff * CAR_ENCODER_BALANCE_KP;
+	Balance = LimitFloat(Balance, -CAR_BALANCE_LIMIT, CAR_BALANCE_LIMIT);
+
+	Line_Steer_PWM = (int8_t)Steer;
+	Encoder_Balance_PWM = (int8_t)Balance;
+	LeftPWM = CAR_BASE_PWM + Steer - Balance;
+	RightPWM = CAR_BASE_PWM - Steer + Balance;
+	Car_SetForwardPWM(LeftPWM, RightPWM);
+}
+
+static void OLED_ShowLineStateRToL(uint8_t X, uint8_t Y, uint8_t FontSize)
+{
+	const uint8_t Order[GRAY_SENSOR_COUNT] = {
+		GRAY_IDX_R3, GRAY_IDX_R2, GRAY_IDX_R1, GRAY_IDX_M,
+		GRAY_IDX_L1, GRAY_IDX_L2, GRAY_IDX_L3
+	};
+	uint8_t i;
+
+	for (i = 0; i < GRAY_SENSOR_COUNT; i++)
+	{
+		OLED_ShowChar(X + i * FontSize, Y,
+		              Gray_Sensor[Order[i]] ? '1' : '0', FontSize);
+	}
+}
+
+static void OLED_ShowUltrasonicLine(uint8_t Y, char Label,
+	                                UltrasonicChannel_t Channel,
+	                                uint16_t Distance)
+{
+	if (Distance == US_INVALID_DISTANCE_CM)
+	{
+		OLED_Printf(0, Y, OLED_8X16, "%c:--- E:%d", Label,
+		            Ultrasonic_GetStatus(Channel));
+	}
+	else
+	{
+		OLED_Printf(0, Y, OLED_8X16, "%c:%03d cm", Label, Distance);
+	}
+}
+
+static void OLED_Task(void)
+{
+	uint16_t DisplayForwardCount;
+
+	DisplayForwardCount = (Turn_Forward_Count != 0) ? Turn_Forward_Count : Turn_Last_Forward_Count;
+	OLED_Clear();
+	if (Display_Page == DISPLAY_PAGE_LINE)
+	{
+		OLED_ShowString(0, 0, Car_Running ? "RUN  IR:" : "STOP IR:", OLED_6X8);
+		OLED_ShowLineStateRToL(54, 0, OLED_6X8);
+		OLED_Printf(0, 10, OLED_6X8, "E:%+4d D:%+4d", Line_Error, Line_Derivative);
+		OLED_Printf(0, 20, OLED_6X8, "S:%+3d B:%+3d", Line_Steer_PWM, Encoder_Balance_PWM);
+		OLED_Printf(0, 30, OLED_6X8, "PL:%+3d PR:%+3d", PWM_Left, PWM_Right);
+		OLED_Printf(0, 40, OLED_6X8, "L:%+5ld R:%+5ld",
+		            (long)Encoder_Left_Total, (long)Encoder_Right_Total);
+		OLED_Printf(0, 52, OLED_6X8, "M:%c C:%04d W:%04d",
+		            Line_Mode, DisplayForwardCount, CAR_TURN_ENTRY_FORWARD_COUNT);
+	}
+	else
+	{
+		OLED_Printf(0, 0, OLED_8X16, "%s US3",
+		            Car_Running ? "RUN " : "STOP");
+		OLED_ShowUltrasonicLine(16, 'F', US_CH_FRONT, Front_Distance);
+		OLED_ShowUltrasonicLine(32, 'L', US_CH_LEFT, Left_Distance);
+		OLED_ShowUltrasonicLine(48, 'R', US_CH_RIGHT, Right_Distance);
+	}
+	OLED_Update();
+}
+
+static void Key_Task(void)
+{
+	uint8_t KeyNum;
+
+	Key_Tick();
+	KeyNum = Key_GetNum();
+	if (KeyNum == KEY_NUM_K1)
+	{
+		Car_Running = !Car_Running;
+		Car_ResetLineController();
+		if (Car_Running)
+		{
+			Car_ResetEncoderTotals();
+		}
+		if (!Car_Running)
+		{
+			Car_Stop();
+		}
+	}
+	else if (KeyNum == KEY_NUM_K2)
+	{
+		Display_Page = DISPLAY_PAGE_LINE;
+	}
+	else if (KeyNum == KEY_NUM_K3)
+	{
+		Display_Page = DISPLAY_PAGE_ULTRASONIC;
+	}
+}
+
+int main(void)
+{
+	uint16_t DisplayLoopCount = 0;
+	uint8_t UltrasonicLoopCount = 0;
+
+	OLED_Init();
+	Key_Init();
+	Motor_Init();
+	Encoder_Init();
+	Grayscale_Init();
+	Ultrasonic_Init();
+	Car_Stop();
+
+	OLED_Clear();
+	OLED_ShowString(0, 0, "Straight Track", OLED_8X16);
+	OLED_ShowString(0, 24, "K1 Start/Stop", OLED_8X16);
+	OLED_ShowString(0, 48, "K2 Line K3 US", OLED_8X16);
+	OLED_Update();
+	Delay_ms(800);
+
+	while (1)
+	{
+		Car_UpdateEncoders();
+		Key_Task();
+
+		if (++UltrasonicLoopCount >= ULTRASONIC_SAMPLE_TICKS)
+		{
+			UltrasonicLoopCount = 0;
+			Car_UpdateUltrasonicOneStep();
+		}
+
+		if (Car_Running)
+		{
+			Car_LineFollowStraight();
+		}
+		else
+		{
+			Car_Stop();
+			Grayscale_Tick();
+			Line_Error = Car_CalcLineError();
+		}
+
+		if (++DisplayLoopCount >= 5)
+		{
+			DisplayLoopCount = 0;
+			OLED_Task();
+		}
+		Delay_ms(20);
+	}
+}
