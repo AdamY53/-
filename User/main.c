@@ -19,9 +19,14 @@
 #define CAR_PWM_LIMIT              70.0f
 
 #define CAR_SHARP_CONFIRM_TICKS    2
-#define CAR_TURN_APPROACH_TICKS    4
-#define CAR_TURN_MIN_TICKS         8
-#define CAR_TURN_TIMEOUT_TICKS     45
+/* 可调窗口：检测到直角弯后先直行的编码器累计值，参考 OLED 调试页 C 数值调整。 */
+#define CAR_TURN_ENTRY_FORWARD_COUNT 120
+/* 可调窗口：直行累计值接近目标值的允许误差，数值越大越早进入转弯。 */
+#define CAR_TURN_ENTRY_COUNT_WINDOW  8
+/* 可调窗口：编码器异常时最多直行周期数，每个周期约 20ms，防止一直直行。 */
+#define CAR_TURN_ENTRY_MAX_TICKS     20
+/* 可调窗口：方案一固定转弯持续周期数，每个周期约 20ms。 */
+#define CAR_FIXED_TURN_TICKS         12
 #define CAR_REACQUIRE_TICKS        2
 #define CAR_TURN_PWM               34
 #define CAR_TURN_SEARCH_PWM        26
@@ -46,8 +51,7 @@
 
 #define CAR_LINE_STATE_FOLLOW      0
 #define CAR_LINE_STATE_APPROACH    1
-#define CAR_LINE_STATE_TURN_MIN    2
-#define CAR_LINE_STATE_SEARCH      3
+#define CAR_LINE_STATE_FIXED_TURN  2
 
 #define CAR_TURN_NONE              0
 #define CAR_TURN_LEFT              1
@@ -70,6 +74,8 @@ static uint16_t Right_Distance = US_INVALID_DISTANCE_CM;
 
 static int16_t Encoder_Right = 0;
 static int16_t Encoder_Left = 0;
+static int32_t Encoder_Right_Total = 0;
+static int32_t Encoder_Left_Total = 0;
 
 static int16_t Line_Error = 0;
 static int16_t Line_Last_Error = 0;
@@ -82,7 +88,7 @@ static int8_t PWM_Left = 0;
 static uint8_t Line_State = CAR_LINE_STATE_FOLLOW;
 static uint8_t Turn_Direction = CAR_TURN_NONE;
 static uint8_t Turn_Tick = 0;
-static uint8_t Turn_Reacquire_Count = 0;
+static uint16_t Turn_Forward_Count = 0;
 static uint8_t Sharp_Left_Count = 0;
 static uint8_t Sharp_Right_Count = 0;
 static char Line_Mode = 'F';
@@ -112,6 +118,21 @@ static int8_t LimitSignedPWM(int16_t Value)
 	if (Value > 100) {return 100;}
 	if (Value < -100) {return -100;}
 	return (int8_t)Value;
+}
+
+static uint16_t AbsEncoderCount(int16_t Value)
+{
+	int32_t Temp = Value;
+
+	if (Temp < 0)
+	{
+		Temp = -Temp;
+	}
+	if (Temp > 65535)
+	{
+		return 65535;
+	}
+	return (uint16_t)Temp;
 }
 
 static void Car_SetForwardPWM(float LeftPWM, float RightPWM)
@@ -158,7 +179,7 @@ static void Car_ResetLineController(void)
 	Line_State = CAR_LINE_STATE_FOLLOW;
 	Turn_Direction = CAR_TURN_NONE;
 	Turn_Tick = 0;
-	Turn_Reacquire_Count = 0;
+	Turn_Forward_Count = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
 	Line_Mode = 'F';
@@ -178,6 +199,14 @@ static void Car_UpdateEncoders(void)
 {
 	Encoder_Right = Encoder1_Get();
 	Encoder_Left = Encoder2_Get();
+	Encoder_Right_Total += Encoder_Right;
+	Encoder_Left_Total += Encoder_Left;
+}
+
+static void Car_ResetEncoderTotals(void)
+{
+	Encoder_Right_Total = 0;
+	Encoder_Left_Total = 0;
 }
 
 static void Car_UpdateUltrasonicOneStep(void)
@@ -247,7 +276,7 @@ static void Car_StartSharpTurn(uint8_t Direction)
 	Line_State = CAR_LINE_STATE_APPROACH;
 	Turn_Direction = Direction;
 	Turn_Tick = 0;
-	Turn_Reacquire_Count = 0;
+	Turn_Forward_Count = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
 	Line_Mode = (Direction == CAR_TURN_LEFT) ? 'L' : 'R';
@@ -293,48 +322,23 @@ static void Car_RunSharpTurn(void)
 
 	if (Line_State == CAR_LINE_STATE_APPROACH)
 	{
+		Turn_Forward_Count += (AbsEncoderCount(Encoder_Left) + AbsEncoderCount(Encoder_Right)) / 2;
 		Line_Mode = 'A';
 		Car_SetForwardPWM(CAR_BASE_PWM, CAR_BASE_PWM);
-		if (Turn_Tick >= CAR_TURN_APPROACH_TICKS)
+		if (((Turn_Forward_Count + CAR_TURN_ENTRY_COUNT_WINDOW) >= CAR_TURN_ENTRY_FORWARD_COUNT)
+		 || (Turn_Tick >= CAR_TURN_ENTRY_MAX_TICKS))
 		{
 			Turn_Tick = 0;
-			Line_State = CAR_LINE_STATE_TURN_MIN;
+			Line_State = CAR_LINE_STATE_FIXED_TURN;
 		}
 		return;
 	}
 
-	if (Line_State == CAR_LINE_STATE_TURN_MIN)
-	{
-		Line_Mode = (Turn_Direction == CAR_TURN_LEFT) ? 'L' : 'R';
-		Car_SetTurnPWM(Turn_Direction, CAR_TURN_PWM);
-		if (Turn_Tick >= CAR_TURN_MIN_TICKS)
-		{
-			Turn_Tick = 0;
-			Turn_Reacquire_Count = 0;
-			Line_State = CAR_LINE_STATE_SEARCH;
-		}
-		return;
-	}
-
-	Line_Mode = 'S';
-	Car_SetTurnPWM(Turn_Direction, CAR_TURN_SEARCH_PWM);
-	if (Car_CenterLineDetected())
-	{
-		Turn_Reacquire_Count++;
-		if (Turn_Reacquire_Count >= CAR_REACQUIRE_TICKS)
-		{
-			Car_ResetLineController();
-		}
-	}
-	else
-	{
-		Turn_Reacquire_Count = 0;
-	}
-
-	if (Turn_Tick >= CAR_TURN_TIMEOUT_TICKS)
+	Line_Mode = (Turn_Direction == CAR_TURN_LEFT) ? 'L' : 'R';
+	Car_SetTurnPWM(Turn_Direction, CAR_TURN_PWM);
+	if (Turn_Tick >= CAR_FIXED_TURN_TICKS)
 	{
 		Car_ResetLineController();
-		Car_Stop();
 	}
 }
 
@@ -344,7 +348,7 @@ static void Car_StartObstacleAvoidance(void)
 	Line_State = CAR_LINE_STATE_FOLLOW;
 	Turn_Direction = CAR_TURN_NONE;
 	Turn_Tick = 0;
-	Turn_Reacquire_Count = 0;
+	Turn_Forward_Count = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
 	Avoid_State = CAR_AVOID_STATE_SCAN_LEFT;
@@ -583,8 +587,9 @@ static void OLED_Task(void)
 		OLED_Printf(0, 10, OLED_6X8, "E:%+4d D:%+4d", Line_Error, Line_Derivative);
 		OLED_Printf(0, 20, OLED_6X8, "S:%+3d B:%+3d", Line_Steer_PWM, Encoder_Balance_PWM);
 		OLED_Printf(0, 30, OLED_6X8, "PL:%+3d PR:%+3d", PWM_Left, PWM_Right);
-		OLED_Printf(0, 40, OLED_6X8, "EL:%+4d ER:%+4d", Encoder_Left, Encoder_Right);
-		OLED_Printf(0, 52, OLED_6X8, "M:%c T:%02d K3 US", Line_Mode, Turn_Tick);
+		OLED_Printf(0, 40, OLED_6X8, "L:%+5ld R:%+5ld",
+		            (long)Encoder_Left_Total, (long)Encoder_Right_Total);
+		OLED_Printf(0, 52, OLED_6X8, "M:%c T:%02d C:%04d", Line_Mode, Turn_Tick, Turn_Forward_Count);
 	}
 	else
 	{
@@ -607,6 +612,10 @@ static void Key_Task(void)
 	{
 		Car_Running = !Car_Running;
 		Car_ResetObstacleAvoidance();
+		if (Car_Running)
+		{
+			Car_ResetEncoderTotals();
+		}
 		if (!Car_Running)
 		{
 			Car_Stop();

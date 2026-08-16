@@ -1,5 +1,35 @@
 # Codex Change Log
 
+## 2026-08-16 - Fixed-Time 90-Degree Line Turn
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Replaced the previous 90-degree turn search/reacquire state machine with
+  the simpler fixed-time turn approach.
+- The sharp-turn trigger is still conservative: the left or right 3-sensor
+  group must have at least 2 active sensors for 2 consecutive control ticks.
+- Once triggered, the car first drives straight until the average left/right
+  encoder increment reaches the adjustable `CAR_TURN_ENTRY_FORWARD_COUNT`
+  window, then pivots in the detected direction for `CAR_FIXED_TURN_TICKS`
+  ticks and resets to normal line following.
+- Added Chinese comments for the adjustable 90-degree turn windows, including
+  entry distance, entry tolerance, encoder fallback timeout, and fixed turn
+  duration.
+- The OLED line debug page now shows `C`, the accumulated encoder count used
+  by the entry-distance window.
+- The OLED line debug page now also shows left/right wheel cumulative encoder
+  counts, with forward movement displayed as positive values.
+- K1 start now resets the wheel cumulative counters, so each test run starts
+  from zero.
+- Kept the latest obstacle-avoidance, OLED, key, ultrasonic, and servo logic
+  untouched in this change.
+
+Build/verification:
+- `User/main.c` compiled successfully with ARMCC to
+  `Objects/codex_main_fixed_turn.o`.
+
 ## 2026-08-16 - Servo-Centered Obstacle Avoidance
 
 Files changed:
