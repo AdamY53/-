@@ -1,5 +1,25 @@
 # Codex Change Log
 
+## 2026-08-17 - Stronger 90-Degree Turn Trigger and Cooldown
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Strengthened 90-degree turn detection from side-only 2-of-3 to
+  `M+L1+L2+L3` or `M+R1+R2+R3` 3-of-4 confirmation.
+- Added the adjustable `CAR_TURN_COOLDOWN_TICKS` window after each completed
+  90-degree turn. During cooldown, the car keeps normal line following but
+  will not trigger another 90-degree turn.
+- Kept all turn tuning windows annotated with Chinese comments.
+- Changed the OLED line debug page to show `C` as the active or last saved
+  forward-entry encoder count and `W` as the code target window, so `C` can
+  be compared directly with `CAR_TURN_ENTRY_FORWARD_COUNT`.
+
+Build/verification:
+- `User/main.c` compiled successfully with ARMCC to
+  `Objects/codex_main_turn_cooldown.o`.
+
 ## 2026-08-16 - Map Tracking Without Servo Avoidance
 
 Files changed:

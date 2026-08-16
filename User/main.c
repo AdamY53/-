@@ -17,7 +17,10 @@
 #define CAR_MIN_FORWARD_PWM        10.0f
 #define CAR_PWM_LIMIT              70.0f
 
+/* 可调窗口：90度拐点需要连续确认的周期数，每个周期约 20ms，数值越大越不容易误触发。 */
 #define CAR_SHARP_CONFIRM_TICKS    2
+/* 可调窗口：M+左侧三路或 M+右侧三路中至少几个高电平才允许触发90度转弯。 */
+#define CAR_SHARP_GROUP_ACTIVE_MIN 3
 /* 可调窗口：检测到直角弯后先直行的编码器累计值，参考 OLED 调试页 C 数值调整。 */
 #define CAR_TURN_ENTRY_FORWARD_COUNT 120
 /* 可调窗口：直行累计值接近目标值的允许误差，数值越大越早进入转弯。 */
@@ -28,6 +31,8 @@
 #define CAR_FIXED_TURN_PWM           34
 /* 可调窗口：方案一固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
 #define CAR_FIXED_TURN_TICKS         12
+/* 可调窗口：每次完成90度转弯后的屏蔽周期数，屏蔽期内不再次触发90度转弯。 */
+#define CAR_TURN_COOLDOWN_TICKS      20
 #define ULTRASONIC_SAMPLE_TICKS    3
 
 #define DISPLAY_PAGE_LINE          0
@@ -66,6 +71,8 @@ static uint8_t Line_State = CAR_LINE_STATE_FOLLOW;
 static uint8_t Turn_Direction = CAR_TURN_NONE;
 static uint8_t Turn_Tick = 0;
 static uint16_t Turn_Forward_Count = 0;
+static uint16_t Turn_Last_Forward_Count = 0;
+static uint8_t Turn_Cooldown_Tick = 0;
 static uint8_t Sharp_Left_Count = 0;
 static uint8_t Sharp_Right_Count = 0;
 static char Line_Mode = 'F';
@@ -145,6 +152,7 @@ static void Car_ResetLineController(void)
 	Turn_Direction = CAR_TURN_NONE;
 	Turn_Tick = 0;
 	Turn_Forward_Count = 0;
+	Turn_Cooldown_Tick = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
 	Line_Mode = 'F';
@@ -162,6 +170,7 @@ static void Car_ResetEncoderTotals(void)
 {
 	Encoder_Right_Total = 0;
 	Encoder_Left_Total = 0;
+	Turn_Last_Forward_Count = 0;
 }
 
 static void Car_UpdateUltrasonicOneStep(void)
@@ -206,18 +215,20 @@ static int16_t Car_CalcLineError(void)
 	return PositionSum / Gray_ActiveCount;
 }
 
-static uint8_t Car_CountLeftSensors(void)
+static uint8_t Car_CountLeftTurnSensors(void)
 {
 	return Gray_Sensor[GRAY_IDX_L3]
 	     + Gray_Sensor[GRAY_IDX_L2]
-	     + Gray_Sensor[GRAY_IDX_L1];
+	     + Gray_Sensor[GRAY_IDX_L1]
+	     + Gray_Sensor[GRAY_IDX_M];
 }
 
-static uint8_t Car_CountRightSensors(void)
+static uint8_t Car_CountRightTurnSensors(void)
 {
 	return Gray_Sensor[GRAY_IDX_R1]
 	     + Gray_Sensor[GRAY_IDX_R2]
-	     + Gray_Sensor[GRAY_IDX_R3];
+	     + Gray_Sensor[GRAY_IDX_R3]
+	     + Gray_Sensor[GRAY_IDX_M];
 }
 
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
@@ -239,17 +250,26 @@ static void Car_StartSharpTurn(uint8_t Direction)
 	Turn_Direction = Direction;
 	Turn_Tick = 0;
 	Turn_Forward_Count = 0;
+	Turn_Cooldown_Tick = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
 	Line_Mode = (Direction == CAR_TURN_LEFT) ? 'L' : 'R';
 }
 
+static void Car_FinishSharpTurn(void)
+{
+	Turn_Last_Forward_Count = Turn_Forward_Count;
+	Car_ResetLineController();
+	Turn_Cooldown_Tick = CAR_TURN_COOLDOWN_TICKS;
+	Line_Mode = 'K';
+}
+
 static uint8_t Car_UpdateSharpTurnDetect(void)
 {
-	uint8_t LeftCount = Car_CountLeftSensors();
-	uint8_t RightCount = Car_CountRightSensors();
+	uint8_t LeftCount = Car_CountLeftTurnSensors();
+	uint8_t RightCount = Car_CountRightTurnSensors();
 
-	if ((LeftCount >= 2) && (RightCount < 2))
+	if ((LeftCount >= CAR_SHARP_GROUP_ACTIVE_MIN) && (RightCount < CAR_SHARP_GROUP_ACTIVE_MIN))
 	{
 		Sharp_Left_Count++;
 		Sharp_Right_Count = 0;
@@ -259,7 +279,7 @@ static uint8_t Car_UpdateSharpTurnDetect(void)
 			return 1;
 		}
 	}
-	else if ((RightCount >= 2) && (LeftCount < 2))
+	else if ((RightCount >= CAR_SHARP_GROUP_ACTIVE_MIN) && (LeftCount < CAR_SHARP_GROUP_ACTIVE_MIN))
 	{
 		Sharp_Right_Count++;
 		Sharp_Left_Count = 0;
@@ -290,6 +310,7 @@ static void Car_RunSharpTurn(void)
 		if (((Turn_Forward_Count + CAR_TURN_ENTRY_COUNT_WINDOW) >= CAR_TURN_ENTRY_FORWARD_COUNT)
 		 || (Turn_Tick >= CAR_TURN_ENTRY_MAX_TICKS))
 		{
+			Turn_Last_Forward_Count = Turn_Forward_Count;
 			Turn_Tick = 0;
 			Line_State = CAR_LINE_STATE_FIXED_TURN;
 		}
@@ -300,7 +321,7 @@ static void Car_RunSharpTurn(void)
 	Car_SetTurnPWM(Turn_Direction, CAR_FIXED_TURN_PWM);
 	if (Turn_Tick >= CAR_FIXED_TURN_TICKS)
 	{
-		Car_ResetLineController();
+		Car_FinishSharpTurn();
 	}
 }
 
@@ -327,7 +348,13 @@ static void Car_LineFollowStraight(void)
 		return;
 	}
 
-	if (Car_UpdateSharpTurnDetect())
+	if (Turn_Cooldown_Tick > 0)
+	{
+		Turn_Cooldown_Tick--;
+		Sharp_Left_Count = 0;
+		Sharp_Right_Count = 0;
+	}
+	else if (Car_UpdateSharpTurnDetect())
 	{
 		Car_RunSharpTurn();
 		return;
@@ -336,7 +363,7 @@ static void Car_LineFollowStraight(void)
 	Line_Error = Car_CalcLineError();
 	Line_Derivative = Line_Error - Line_Last_Error;
 	Line_Last_Error = Line_Error;
-	Line_Mode = 'F';
+	Line_Mode = (Turn_Cooldown_Tick > 0) ? 'K' : 'F';
 
 	Steer = (float)Line_Error * CAR_LINE_KP
 	      + (float)Line_Derivative * CAR_LINE_KD;
@@ -385,6 +412,9 @@ static void OLED_ShowUltrasonicLine(uint8_t Y, char Label,
 
 static void OLED_Task(void)
 {
+	uint16_t DisplayForwardCount;
+
+	DisplayForwardCount = (Turn_Forward_Count != 0) ? Turn_Forward_Count : Turn_Last_Forward_Count;
 	OLED_Clear();
 	if (Display_Page == DISPLAY_PAGE_LINE)
 	{
@@ -395,7 +425,8 @@ static void OLED_Task(void)
 		OLED_Printf(0, 30, OLED_6X8, "PL:%+3d PR:%+3d", PWM_Left, PWM_Right);
 		OLED_Printf(0, 40, OLED_6X8, "L:%+5ld R:%+5ld",
 		            (long)Encoder_Left_Total, (long)Encoder_Right_Total);
-		OLED_Printf(0, 52, OLED_6X8, "M:%c T:%02d C:%04d", Line_Mode, Turn_Tick, Turn_Forward_Count);
+		OLED_Printf(0, 52, OLED_6X8, "M:%c C:%04d W:%04d",
+		            Line_Mode, DisplayForwardCount, CAR_TURN_ENTRY_FORWARD_COUNT);
 	}
 	else
 	{
