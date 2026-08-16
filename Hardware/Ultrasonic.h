@@ -8,8 +8,7 @@
  * US2 left : TRIG PA11, ECHO PA12
  * US3 right: TRIG PC14, ECHO PC13
  *
- * Important: most ultrasonic ECHO pins output 5 V. Use a divider or level
- * shifter before connecting ECHO to STM32 input pins.
+ * ECHO is normally 5 V. Use a divider or level shifter before the STM32 pin.
  */
 #define US1_TRIG_GPIO_CLK      RCC_APB2Periph_GPIOA
 #define US1_ECHO_GPIO_CLK      RCC_APB2Periph_GPIOA
@@ -32,7 +31,8 @@
 #define US3_TRIG_PIN           GPIO_Pin_14
 #define US3_ECHO_PIN           GPIO_Pin_13
 
-#define US_TIMEOUT_US          25000UL
+#define US_TIMEOUT_US          30000UL
+#define US_INVALID_DISTANCE_CM 0xFFFFU
 
 typedef enum
 {
@@ -41,7 +41,17 @@ typedef enum
 	US_CH_RIGHT = 2
 } UltrasonicChannel_t;
 
+typedef enum
+{
+	US_STATUS_OK = 0,
+	US_STATUS_WAIT_RISE_TIMEOUT = 1,
+	US_STATUS_HIGH_TIMEOUT = 2,
+	US_STATUS_INVALID_CHANNEL = 3,
+	US_STATUS_ECHO_STUCK_HIGH = 4
+} UltrasonicStatus_t;
+
 void Ultrasonic_Init(void);
 uint16_t Ultrasonic_GetDistanceCm(UltrasonicChannel_t Channel);
+UltrasonicStatus_t Ultrasonic_GetStatus(UltrasonicChannel_t Channel);
 
 #endif

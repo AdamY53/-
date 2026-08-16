@@ -1,5 +1,34 @@
 # Codex Change Log
 
+## 2026-08-16 - Straight-Line-Only Control and Ultrasonic Diagnostics
+
+Files changed:
+- `User/main.c`
+- `Hardware/Grayscale.c`
+- `Hardware/Grayscale.h`
+- `Hardware/Ultrasonic.c`
+- `Hardware/Ultrasonic.h`
+
+What changed:
+- Removed obstacle avoidance, servo scanning, open-loop turns, and reverse
+  motor commands from the application layer.
+- Restricted line-following output to forward PWM only. Both wheels keep the
+  configured minimum forward PWM while tracking; a lost line stops the car.
+- Kept K1 as start/stop, K2 as the line-debug OLED page, and K3 as the three-
+  channel ultrasonic OLED page.
+- Fixed the servo at 0 degrees during initialization and removed later angle
+  changes.
+- Removed unused crossing, turn, and route-history state from the grayscale
+  driver; it now only samples the seven sensors and counts active channels.
+- Reworked ultrasonic timing to measure the ECHO pulse with one continuous
+  SysTick counter, spaced channel sampling to reduce acoustic crosstalk, and
+  exposed error status codes. OLED now shows `--- E:n` for a missing echo
+  instead of presenting a timeout as `0 cm`.
+
+Build/verification:
+- Keil uVision build completed successfully with 0 errors and 0 warnings.
+- Program size: `Code=15878 RO-data=3250 RW-data=80 ZI-data=2656`.
+
 ## 2026-08-15 15:30 - Straight Line PD Following
 
 Files changed:
