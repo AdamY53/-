@@ -6,7 +6,6 @@
 #include "Encoder.h"
 #include "Grayscale.h"
 #include "Ultrasonic.h"
-#include "Servo.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
 #define CAR_BASE_PWM               36.0f
@@ -25,25 +24,10 @@
 #define CAR_TURN_ENTRY_COUNT_WINDOW  8
 /* 可调窗口：编码器异常时最多直行周期数，每个周期约 20ms，防止一直直行。 */
 #define CAR_TURN_ENTRY_MAX_TICKS     20
-/* 可调窗口：方案一固定转弯持续周期数，每个周期约 20ms。 */
+/* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
+#define CAR_FIXED_TURN_PWM           34
+/* 可调窗口：方案一固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
 #define CAR_FIXED_TURN_TICKS         12
-#define CAR_REACQUIRE_TICKS        2
-#define CAR_TURN_PWM               34
-#define CAR_TURN_SEARCH_PWM        26
-
-#define SERVO_RIGHT_ANGLE          30
-#define SERVO_FRONT_ANGLE          90
-#define SERVO_LEFT_ANGLE           150
-#define SERVO_SETTLE_TICKS         12
-
-#define OBSTACLE_DISTANCE_CM       20
-#define AVOID_REVERSE_TICKS        8
-#define AVOID_TURN_TICKS           16
-#define AVOID_BYPASS_TICKS         30
-#define AVOID_SEARCH_TIMEOUT_TICKS 70
-#define AVOID_TURN_PWM             32
-#define AVOID_FORWARD_PWM          34
-#define AVOID_REVERSE_PWM          24
 #define ULTRASONIC_SAMPLE_TICKS    3
 
 #define DISPLAY_PAGE_LINE          0
@@ -57,20 +41,13 @@
 #define CAR_TURN_LEFT              1
 #define CAR_TURN_RIGHT             2
 
-#define CAR_AVOID_STATE_NONE       0
-#define CAR_AVOID_STATE_SCAN_LEFT  1
-#define CAR_AVOID_STATE_SCAN_RIGHT 2
-#define CAR_AVOID_STATE_BACK       3
-#define CAR_AVOID_STATE_TURN       4
-#define CAR_AVOID_STATE_BYPASS     5
-#define CAR_AVOID_STATE_SEARCH     6
-
 static uint8_t Car_Running = 0;
 static uint8_t Display_Page = DISPLAY_PAGE_ULTRASONIC;
 
 static uint16_t Front_Distance = US_INVALID_DISTANCE_CM;
 static uint16_t Left_Distance = US_INVALID_DISTANCE_CM;
 static uint16_t Right_Distance = US_INVALID_DISTANCE_CM;
+static uint8_t Ultrasonic_Index = 0;
 
 static int16_t Encoder_Right = 0;
 static int16_t Encoder_Left = 0;
@@ -92,12 +69,6 @@ static uint16_t Turn_Forward_Count = 0;
 static uint8_t Sharp_Left_Count = 0;
 static uint8_t Sharp_Right_Count = 0;
 static char Line_Mode = 'F';
-
-static uint8_t Servo_Angle = SERVO_FRONT_ANGLE;
-static uint8_t Avoid_State = CAR_AVOID_STATE_NONE;
-static uint8_t Avoid_Tick = 0;
-static uint8_t Avoid_Direction = CAR_TURN_RIGHT;
-static uint8_t Avoid_Reacquire_Count = 0;
 
 static float LimitFloat(float Value, float Min, float Max)
 {
@@ -158,12 +129,6 @@ static void Car_Stop(void)
 	Motor_Stop();
 }
 
-static void Car_SetServoAngle(uint8_t Angle)
-{
-	Servo_Angle = Angle;
-	Servo_SetAngle(Angle);
-}
-
 static void Car_ClearLinePD(void)
 {
 	Line_Error = 0;
@@ -185,16 +150,6 @@ static void Car_ResetLineController(void)
 	Line_Mode = 'F';
 }
 
-static uint8_t Car_DistanceValid(uint16_t Distance)
-{
-	return (Distance != US_INVALID_DISTANCE_CM) ? 1 : 0;
-}
-
-static uint8_t Car_ObstacleDetected(uint16_t Distance)
-{
-	return (Car_DistanceValid(Distance) && (Distance <= OBSTACLE_DISTANCE_CM)) ? 1 : 0;
-}
-
 static void Car_UpdateEncoders(void)
 {
 	Encoder_Right = Encoder1_Get();
@@ -211,9 +166,23 @@ static void Car_ResetEncoderTotals(void)
 
 static void Car_UpdateUltrasonicOneStep(void)
 {
-	if (Avoid_State == CAR_AVOID_STATE_NONE)
+	if (Ultrasonic_Index == 0)
 	{
 		Front_Distance = Ultrasonic_GetDistanceCm(US_CH_FRONT);
+	}
+	else if (Ultrasonic_Index == 1)
+	{
+		Left_Distance = Ultrasonic_GetDistanceCm(US_CH_LEFT);
+	}
+	else
+	{
+		Right_Distance = Ultrasonic_GetDistanceCm(US_CH_RIGHT);
+	}
+
+	Ultrasonic_Index++;
+	if (Ultrasonic_Index >= 3)
+	{
+		Ultrasonic_Index = 0;
 	}
 }
 
@@ -249,13 +218,6 @@ static uint8_t Car_CountRightSensors(void)
 	return Gray_Sensor[GRAY_IDX_R1]
 	     + Gray_Sensor[GRAY_IDX_R2]
 	     + Gray_Sensor[GRAY_IDX_R3];
-}
-
-static uint8_t Car_CenterLineDetected(void)
-{
-	return (Gray_Sensor[GRAY_IDX_L1]
-	     || Gray_Sensor[GRAY_IDX_M]
-	     || Gray_Sensor[GRAY_IDX_R1]) ? 1 : 0;
 }
 
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
@@ -335,153 +297,10 @@ static void Car_RunSharpTurn(void)
 	}
 
 	Line_Mode = (Turn_Direction == CAR_TURN_LEFT) ? 'L' : 'R';
-	Car_SetTurnPWM(Turn_Direction, CAR_TURN_PWM);
+	Car_SetTurnPWM(Turn_Direction, CAR_FIXED_TURN_PWM);
 	if (Turn_Tick >= CAR_FIXED_TURN_TICKS)
 	{
 		Car_ResetLineController();
-	}
-}
-
-static void Car_StartObstacleAvoidance(void)
-{
-	Car_ClearLinePD();
-	Line_State = CAR_LINE_STATE_FOLLOW;
-	Turn_Direction = CAR_TURN_NONE;
-	Turn_Tick = 0;
-	Turn_Forward_Count = 0;
-	Sharp_Left_Count = 0;
-	Sharp_Right_Count = 0;
-	Avoid_State = CAR_AVOID_STATE_SCAN_LEFT;
-	Avoid_Tick = 0;
-	Avoid_Direction = CAR_TURN_RIGHT;
-	Avoid_Reacquire_Count = 0;
-	Line_Mode = 'O';
-	Car_Stop();
-	Car_SetServoAngle(SERVO_LEFT_ANGLE);
-}
-
-static void Car_ResetObstacleAvoidance(void)
-{
-	Avoid_State = CAR_AVOID_STATE_NONE;
-	Avoid_Tick = 0;
-	Avoid_Reacquire_Count = 0;
-	Front_Distance = US_INVALID_DISTANCE_CM;
-	Car_SetServoAngle(SERVO_FRONT_ANGLE);
-	Car_ResetLineController();
-}
-
-static uint8_t Car_OppositeDirection(uint8_t Direction)
-{
-	return (Direction == CAR_TURN_LEFT) ? CAR_TURN_RIGHT : CAR_TURN_LEFT;
-}
-
-static uint8_t Car_SelectAvoidDirection(void)
-{
-	if (Car_DistanceValid(Left_Distance) && Car_DistanceValid(Right_Distance))
-	{
-		return (Left_Distance >= Right_Distance) ? CAR_TURN_LEFT : CAR_TURN_RIGHT;
-	}
-	if (Car_DistanceValid(Left_Distance))
-	{
-		return CAR_TURN_LEFT;
-	}
-	if (Car_DistanceValid(Right_Distance))
-	{
-		return CAR_TURN_RIGHT;
-	}
-	return CAR_TURN_RIGHT;
-}
-
-static void Car_RunObstacleAvoidance(void)
-{
-	Avoid_Tick++;
-
-	if (Avoid_State == CAR_AVOID_STATE_SCAN_LEFT)
-	{
-		Line_Mode = 'O';
-		Car_Stop();
-		if (Avoid_Tick >= SERVO_SETTLE_TICKS)
-		{
-			Left_Distance = Ultrasonic_GetDistanceCm(US_CH_FRONT);
-			Car_SetServoAngle(SERVO_RIGHT_ANGLE);
-			Avoid_Tick = 0;
-			Avoid_State = CAR_AVOID_STATE_SCAN_RIGHT;
-		}
-		return;
-	}
-
-	if (Avoid_State == CAR_AVOID_STATE_SCAN_RIGHT)
-	{
-		Line_Mode = 'O';
-		Car_Stop();
-		if (Avoid_Tick >= SERVO_SETTLE_TICKS)
-		{
-			Right_Distance = Ultrasonic_GetDistanceCm(US_CH_FRONT);
-			Avoid_Direction = Car_SelectAvoidDirection();
-			Car_SetServoAngle(SERVO_FRONT_ANGLE);
-			Avoid_Tick = 0;
-			Avoid_State = CAR_AVOID_STATE_BACK;
-		}
-		return;
-	}
-
-	if (Avoid_State == CAR_AVOID_STATE_BACK)
-	{
-		Line_Mode = 'B';
-		Car_SetSignedPWM(-(int16_t)AVOID_REVERSE_PWM, -(int16_t)AVOID_REVERSE_PWM);
-		if (Avoid_Tick >= AVOID_REVERSE_TICKS)
-		{
-			Avoid_Tick = 0;
-			Avoid_State = CAR_AVOID_STATE_TURN;
-		}
-		return;
-	}
-
-	if (Avoid_State == CAR_AVOID_STATE_TURN)
-	{
-		Line_Mode = (Avoid_Direction == CAR_TURN_LEFT) ? 'L' : 'R';
-		Car_SetTurnPWM(Avoid_Direction, AVOID_TURN_PWM);
-		if (Avoid_Tick >= AVOID_TURN_TICKS)
-		{
-			Avoid_Tick = 0;
-			Avoid_State = CAR_AVOID_STATE_BYPASS;
-		}
-		return;
-	}
-
-	if (Avoid_State == CAR_AVOID_STATE_BYPASS)
-	{
-		Line_Mode = 'P';
-		Car_SetForwardPWM(AVOID_FORWARD_PWM, AVOID_FORWARD_PWM);
-		if (Avoid_Tick >= AVOID_BYPASS_TICKS)
-		{
-			Avoid_Tick = 0;
-			Avoid_Reacquire_Count = 0;
-			Avoid_State = CAR_AVOID_STATE_SEARCH;
-		}
-		return;
-	}
-
-	Line_Mode = 'S';
-	Grayscale_Tick();
-	Car_SetTurnPWM(Car_OppositeDirection(Avoid_Direction), CAR_TURN_SEARCH_PWM);
-	if (Car_CenterLineDetected())
-	{
-		Avoid_Reacquire_Count++;
-		if (Avoid_Reacquire_Count >= CAR_REACQUIRE_TICKS)
-		{
-			Car_ResetObstacleAvoidance();
-		}
-	}
-	else
-	{
-		Avoid_Reacquire_Count = 0;
-	}
-
-	if (Avoid_Tick >= AVOID_SEARCH_TIMEOUT_TICKS)
-	{
-		Car_ResetObstacleAvoidance();
-		Car_Stop();
 	}
 }
 
@@ -494,19 +313,6 @@ static void Car_LineFollowStraight(void)
 	int16_t SpeedDiff;
 
 	Grayscale_Tick();
-
-	if (Avoid_State != CAR_AVOID_STATE_NONE)
-	{
-		Car_RunObstacleAvoidance();
-		return;
-	}
-
-	if (Car_ObstacleDetected(Front_Distance))
-	{
-		Car_StartObstacleAvoidance();
-		Car_RunObstacleAvoidance();
-		return;
-	}
 
 	if (Line_State != CAR_LINE_STATE_FOLLOW)
 	{
@@ -593,11 +399,11 @@ static void OLED_Task(void)
 	}
 	else
 	{
-		OLED_Printf(0, 0, OLED_8X16, "%s SV:%03d",
-		            Car_Running ? "RUN " : "STOP", Servo_Angle);
+		OLED_Printf(0, 0, OLED_8X16, "%s US3",
+		            Car_Running ? "RUN " : "STOP");
 		OLED_ShowUltrasonicLine(16, 'F', US_CH_FRONT, Front_Distance);
-		OLED_ShowUltrasonicLine(32, 'L', US_CH_FRONT, Left_Distance);
-		OLED_ShowUltrasonicLine(48, 'R', US_CH_FRONT, Right_Distance);
+		OLED_ShowUltrasonicLine(32, 'L', US_CH_LEFT, Left_Distance);
+		OLED_ShowUltrasonicLine(48, 'R', US_CH_RIGHT, Right_Distance);
 	}
 	OLED_Update();
 }
@@ -611,7 +417,7 @@ static void Key_Task(void)
 	if (KeyNum == KEY_NUM_K1)
 	{
 		Car_Running = !Car_Running;
-		Car_ResetObstacleAvoidance();
+		Car_ResetLineController();
 		if (Car_Running)
 		{
 			Car_ResetEncoderTotals();
@@ -642,8 +448,6 @@ int main(void)
 	Encoder_Init();
 	Grayscale_Init();
 	Ultrasonic_Init();
-	Servo_Init();
-	Car_SetServoAngle(SERVO_FRONT_ANGLE);
 	Car_Stop();
 
 	OLED_Clear();

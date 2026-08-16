@@ -1,5 +1,27 @@
 # Codex Change Log
 
+## 2026-08-16 - Map Tracking Without Servo Avoidance
+
+Files changed:
+- `User/main.c`
+- `接线说明.txt`
+
+What changed:
+- Removed all servo-based obstacle-avoidance logic from `main.c`.
+- Restored fixed three-channel ultrasonic polling: front, left, and right
+  modules are measured in rotation and displayed separately on OLED.
+- Fixed 90-degree map turns now use two adjustable windows: encoder-count
+  forward entry distance and reverse-direction differential motor PWM/time.
+- OLED line debug page keeps `L`, `R`, and `C` in the same encoder-count
+  unit, so the observed wheel counts can be copied directly into the forward
+  entry-distance tuning window.
+- Updated wiring notes to describe the three fixed ultrasonic modules and
+  remove the obsolete servo scanning/avoidance text.
+
+Build/verification:
+- `User/main.c` compiled successfully with ARMCC to
+  `Objects/codex_main_map_tracking.o`.
+
 ## 2026-08-16 - Fixed-Time 90-Degree Line Turn
 
 Files changed:
