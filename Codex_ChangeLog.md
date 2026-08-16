@@ -1,5 +1,27 @@
 # Codex Change Log
 
+## 2026-08-16 - Servo-Centered Obstacle Avoidance
+
+Files changed:
+- `User/main.c`
+- `接线说明.txt`
+
+What changed:
+- Changed the normal tracking servo posture from 0 degrees to 90 degrees so
+  the HC-SR04 faces forward during line following.
+- Added a front-obstacle avoidance state machine: stop, scan left and right
+  with the SG90-mounted front ultrasonic module, choose the clearer side,
+  reverse briefly, turn around the obstacle, move past it, then search back
+  for the center line.
+- The OLED ultrasonic page now shows the live servo angle and the most recent
+  forward/left/right scan distances from the servo-mounted front sensor.
+- K1 start/stop now resets avoidance state and returns the servo to 90 degrees.
+
+Build/verification:
+- `User/main.c` compiled with ARMCC successfully.
+- Linked with `armlink` successfully and regenerated `Objects/Project.hex`.
+- Program size: `Code=17350 RO-data=3250 RW-data=92 ZI-data=2660`.
+
 ## 2026-08-16 - 90-Degree Line Turn State Machine
 
 Files changed:
