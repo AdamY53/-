@@ -1,5 +1,26 @@
 # Codex Change Log
 
+## 2026-08-16 - 90-Degree Line Turn State Machine
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Added a dedicated 90-degree turn state machine for line following.
+- A left or right sharp turn is detected only after the matching side group
+  has at least 2 active sensors for 2 consecutive control ticks.
+- After detection, the car moves forward briefly, performs a minimum pivot
+  turn, then slows down and keeps searching until L1/M/R1 reacquires the line
+  for 2 consecutive ticks.
+- During the turn state, temporary full line loss no longer stops the car
+  immediately; timeout protection still stops the motors if the line is not
+  found again.
+- The OLED line debug page now shows signed left/right PWM and a compact
+  mode indicator: `F` follow, `A` approach, `L/R` minimum turn, `S` search.
+
+Build/verification:
+- Pending local build verification.
+
 ## 2026-08-16 - Straight-Line-Only Control and Ultrasonic Diagnostics
 
 Files changed:
