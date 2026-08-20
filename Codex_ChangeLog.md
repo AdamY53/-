@@ -1,5 +1,33 @@
 # Codex Change Log
 
+## 2026-08-20 - DSH: Ultrasonic Out of Control Loop, Fixed 20ms Slice, Hover Guard
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Kicked the ultrasonic ranging out of the per-loop control path. A full
+  front/left/right round now runs once every 200ms (3 consecutive ranging
+  loops), and the tracking state machine is paused during those ranging loops
+  so the blocking echo wait (up to ~30ms per channel) can no longer stretch
+  the control period.
+- After each full round the loop skips `ULTRASONIC_ROUND_GAP_LOOPS` (= 7)
+  main loops before the next round, so each direction is refreshed every
+  200ms (10 loops x 20ms). The gap is a tunable window: set it to 5 for the
+  old ~160ms cadence.
+- Fixed the time slice: `Delay_ms(20)` now runs at the top of `while(1)`,
+  i.e. before the ranging call, so the fixed 20ms slice is always reserved
+  and the overall loop period stays close to 20ms on non-ranging loops.
+- Changed `CAR_SHARP_CONFIRM_TICKS` from 1.5 (float) to the integer 2.
+- Added a hover guard in `Car_UpdateSharpTurnDetect()`: when
+  `Gray_ActiveCount < 2`, both `Sharp_Left_Count` and `Sharp_Right_Count` are
+  cleared immediately, preventing a false 90-degree trigger while the car is
+  lifted off the track.
+
+Build/verification:
+- Reviewed in DSH agent session; ARMCC build to be re-run in Keil uVision
+  (`Objects/` outputs regenerate on next project build).
+
 ## 2026-08-17 - Stronger 90-Degree Turn Trigger and Cooldown
 
 Files changed:

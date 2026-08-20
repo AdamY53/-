@@ -17,12 +17,12 @@
 #define CAR_MIN_FORWARD_PWM        10.0f
 #define CAR_PWM_LIMIT              70.0f
 
-/* 可调窗口：90度拐点需要连续确认的周期数，每个周期约 20ms，数值越大越不容易误触发。 */
+/* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 20ms，数值越大越不容易误触发。 */
 #define CAR_SHARP_CONFIRM_TICKS    2
 /* 可调窗口：M+左侧三路或 M+右侧三路中至少几个高电平才允许触发90度转弯。 */
 #define CAR_SHARP_GROUP_ACTIVE_MIN 3
 /* 可调窗口：检测到直角弯后先直行的编码器累计值，参考 OLED 调试页 C 数值调整。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 120
+#define CAR_TURN_ENTRY_FORWARD_COUNT 40
 /* 可调窗口：直行累计值接近目标值的允许误差，数值越大越早进入转弯。 */
 #define CAR_TURN_ENTRY_COUNT_WINDOW  8
 /* 可调窗口：编码器异常时最多直行周期数，每个周期约 20ms，防止一直直行。 */
@@ -30,10 +30,19 @@
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           34
 /* 可调窗口：方案一固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
-#define CAR_FIXED_TURN_TICKS         12
+#define CAR_FIXED_TURN_TICKS         10
 /* 可调窗口：每次完成90度转弯后的屏蔽周期数，屏蔽期内不再次触发90度转弯。 */
 #define CAR_TURN_COOLDOWN_TICKS      20
-#define ULTRASONIC_SAMPLE_TICKS    3
+
+/* 主循环固定时间片：约 20ms。延时放在测距调用之前，保证即使超声波阻塞测距，
+ * 这个固定延时也不会被吃掉，整体周期尽量贴近 20ms。 */
+#define CAR_LOOP_PERIOD_MS           20
+/* 超声波整轮周期：每 200ms 完成一轮（前/左/右三路各测一次），每路 200ms 刷新一次。
+ * 测距占用的主循环内暂停循迹状态机，避免控制周期被拉长。 */
+#define ULTRASONIC_ROUND_PERIOD_MS   200
+/* 一轮三路测完后间隔的主循环数：默认 7（3 个测距轮 + 7 个间隔轮 = 10 轮 ≈ 200ms）。
+ * 想更频繁测距可改小，例如 5（则整轮 8 轮 ≈ 160ms）。 */
+#define ULTRASONIC_ROUND_GAP_LOOPS   (ULTRASONIC_ROUND_PERIOD_MS / CAR_LOOP_PERIOD_MS - 3)
 
 #define DISPLAY_PAGE_LINE          0
 #define DISPLAY_PAGE_ULTRASONIC    1
@@ -266,8 +275,20 @@ static void Car_FinishSharpTurn(void)
 
 static uint8_t Car_UpdateSharpTurnDetect(void)
 {
-	uint8_t LeftCount = Car_CountLeftTurnSensors();
-	uint8_t RightCount = Car_CountRightTurnSensors();
+	uint8_t LeftCount;
+	uint8_t RightCount;
+
+	/* 悬空保护：有效灰度数少于 2 时立刻清零左右确认计数，
+	 * 防止小车被拿起/悬空时灰度误读导致 90 度转弯误触发。 */
+	if (Gray_ActiveCount < 2)
+	{
+		Sharp_Left_Count = 0;
+		Sharp_Right_Count = 0;
+		return 0;
+	}
+
+	LeftCount = Car_CountLeftTurnSensors();
+	RightCount = Car_CountRightTurnSensors();
 
 	if ((LeftCount >= CAR_SHARP_GROUP_ACTIVE_MIN) && (RightCount < CAR_SHARP_GROUP_ACTIVE_MIN))
 	{
@@ -471,7 +492,8 @@ static void Key_Task(void)
 int main(void)
 {
 	uint16_t DisplayLoopCount = 0;
-	uint8_t UltrasonicLoopCount = 0;
+	uint8_t Ultrasonic_GapCount = 0;     /* 距下一轮测距还差几个主循环 */
+	uint8_t Ultrasonic_Measuring = 0;    /* 测距轮标志：本轮暂停循迹状态机 */
 
 	OLED_Init();
 	Key_Init();
@@ -490,16 +512,41 @@ int main(void)
 
 	while (1)
 	{
+		/* 固定时间片：延时放在测距调用之前，保证即使测距阻塞，
+		 * 整体周期也尽量贴近 20ms。 */
+		Delay_ms(CAR_LOOP_PERIOD_MS);
+
 		Car_UpdateEncoders();
 		Key_Task();
 
-		if (++UltrasonicLoopCount >= ULTRASONIC_SAMPLE_TICKS)
+		Ultrasonic_Measuring = 0;
+		if (Ultrasonic_GapCount > 0)
 		{
-			UltrasonicLoopCount = 0;
+			Ultrasonic_GapCount--;
+		}
+		else
+		{
+			/* 测距轮：每 200ms 一轮，连续测前/左/右三路（每路最多阻塞约 30ms），
+			 * 测距期间暂停循迹状态机。 */
+			Ultrasonic_Measuring = 1;
 			Car_UpdateUltrasonicOneStep();
+			if (Ultrasonic_Index == 0)
+			{
+				Ultrasonic_GapCount = ULTRASONIC_ROUND_GAP_LOOPS;
+			}
 		}
 
-		if (Car_Running)
+		if (Ultrasonic_Measuring)
+		{
+			/* 测距轮：只刷新灰度与误差供显示，本轮不跑循迹状态机 */
+			Grayscale_Tick();
+			Line_Error = Car_CalcLineError();
+			if (!Car_Running)
+			{
+				Car_Stop();
+			}
+		}
+		else if (Car_Running)
 		{
 			Car_LineFollowStraight();
 		}
@@ -515,6 +562,5 @@ int main(void)
 			DisplayLoopCount = 0;
 			OLED_Task();
 		}
-		Delay_ms(20);
 	}
 }
