@@ -1,5 +1,30 @@
 # Codex Change Log
 
+## 2026-08-20 - DSH: Remove Dead APPROACH Turn Code (trigger-then-pivot only)
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Removed the dead "forward entry" turn stage and its parameters:
+  - `CAR_TURN_ENTRY_FORWARD_COUNT`, `CAR_TURN_ENTRY_COUNT_WINDOW`,
+    `CAR_TURN_ENTRY_MAX_TICKS`, `CAR_LINE_STATE_APPROACH`,
+    `Turn_Forward_Count`, `Turn_Last_Forward_Count`, `AbsEncoderCount`.
+  - The APPROACH branch of `Car_RunSharpTurn` (drive straight while
+    accumulating encoder counts) is gone: a T-turn now immediately enters
+    `CAR_LINE_STATE_FIXED_TURN` and pivots in place for
+    `CAR_FIXED_TURN_TICKS` loops, then cools down for
+    `CAR_TURN_COOLDOWN_TICKS`.
+  - OLED debug page no longer shows the `C`/`W` forward-count windows; only
+    the `M` state character remains (F follow / L/R turning / K cooldown).
+- Kept current tuning: `CAR_SHARP_CONFIRM_TICKS=1`,
+  `CAR_FIXED_TURN_PWM=30`, `CAR_FIXED_TURN_TICKS=13`,
+  `CAR_TURN_COOLDOWN_TICKS=18`.
+
+Build/verification:
+- Reviewed in DSH agent session (brace/paren balance 74/74, 177/177);
+  ARMCC build to be re-run in Keil uVision before field testing.
+
 ## 2026-08-20 - DSH: Ultrasonic Fully Disabled, Focus on Basic Line Tracking
 
 Files changed:

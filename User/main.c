@@ -43,14 +43,8 @@
 /* 可调窗口：T 弯方向映射。若实车转弯方向相反，只改这两个宏即可。 */
 #define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
 #define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
-/* 可调窗口：检测到直角弯后先直行的编码器累计值，参考 OLED 调试页 C 数值调整。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 0
-/* 可调窗口：直行累计值接近目标值的允许误差，数值越大越早进入转弯。 */
-#define CAR_TURN_ENTRY_COUNT_WINDOW  8
-/* 可调窗口：编码器异常时最多直行周期数，每个周期约 20ms，防止一直直行。 */
-#define CAR_TURN_ENTRY_MAX_TICKS     20
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
-#define CAR_FIXED_TURN_PWM           34
+#define CAR_FIXED_TURN_PWM           30
 /* 可调窗口：方案一固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
 #define CAR_FIXED_TURN_TICKS         13
 /* 可调窗口：每次完成90度转弯后的屏蔽周期数，屏蔽期内不再次触发90度转弯。 */
@@ -60,8 +54,7 @@
 #define CAR_LOOP_PERIOD_MS           20
 
 #define CAR_LINE_STATE_FOLLOW      0
-#define CAR_LINE_STATE_APPROACH    1
-#define CAR_LINE_STATE_FIXED_TURN  2
+#define CAR_LINE_STATE_FIXED_TURN  1
 
 #define CAR_TURN_NONE              0
 #define CAR_TURN_LEFT              1
@@ -85,8 +78,6 @@ static int8_t PWM_Left = 0;
 static uint8_t Line_State = CAR_LINE_STATE_FOLLOW;
 static uint8_t Turn_Direction = CAR_TURN_NONE;
 static uint8_t Turn_Tick = 0;
-static uint16_t Turn_Forward_Count = 0;
-static uint16_t Turn_Last_Forward_Count = 0;
 static uint8_t Turn_Cooldown_Tick = 0;
 static uint8_t Sharp_Left_Count = 0;
 static uint8_t Sharp_Right_Count = 0;
@@ -111,21 +102,6 @@ static int8_t LimitSignedPWM(int16_t Value)
 	if (Value > 100) {return 100;}
 	if (Value < -100) {return -100;}
 	return (int8_t)Value;
-}
-
-static uint16_t AbsEncoderCount(int16_t Value)
-{
-	int32_t Temp = Value;
-
-	if (Temp < 0)
-	{
-		Temp = -Temp;
-	}
-	if (Temp > 65535)
-	{
-		return 65535;
-	}
-	return (uint16_t)Temp;
 }
 
 static void Car_SetForwardPWM(float LeftPWM, float RightPWM)
@@ -166,7 +142,6 @@ static void Car_ResetLineController(void)
 	Line_State = CAR_LINE_STATE_FOLLOW;
 	Turn_Direction = CAR_TURN_NONE;
 	Turn_Tick = 0;
-	Turn_Forward_Count = 0;
 	Turn_Cooldown_Tick = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
@@ -185,7 +160,6 @@ static void Car_ResetEncoderTotals(void)
 {
 	Encoder_Right_Total = 0;
 	Encoder_Left_Total = 0;
-	Turn_Last_Forward_Count = 0;
 }
 
 static int16_t Car_CalcLineError(void)
@@ -299,10 +273,9 @@ static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 static void Car_StartSharpTurn(uint8_t Direction)
 {
 	Car_ClearLinePD();
-	Line_State = CAR_LINE_STATE_APPROACH;
+	Line_State = CAR_LINE_STATE_FIXED_TURN;
 	Turn_Direction = Direction;
 	Turn_Tick = 0;
-	Turn_Forward_Count = 0;
 	Turn_Cooldown_Tick = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
@@ -311,7 +284,6 @@ static void Car_StartSharpTurn(uint8_t Direction)
 
 static void Car_FinishSharpTurn(void)
 {
-	Turn_Last_Forward_Count = Turn_Forward_Count;
 	Car_ResetLineController();
 	Turn_Cooldown_Tick = CAR_TURN_COOLDOWN_TICKS;
 	Line_Mode = 'K';
@@ -366,22 +338,6 @@ static uint8_t Car_UpdateSharpTurnDetect(void)
 static void Car_RunSharpTurn(void)
 {
 	Turn_Tick++;
-
-	if (Line_State == CAR_LINE_STATE_APPROACH)
-	{
-		Turn_Forward_Count += (AbsEncoderCount(Encoder_Left) + AbsEncoderCount(Encoder_Right)) / 2;
-		Line_Mode = 'A';
-		Car_SetForwardPWM(CAR_BASE_PWM, CAR_BASE_PWM);
-		if (((Turn_Forward_Count + CAR_TURN_ENTRY_COUNT_WINDOW) >= CAR_TURN_ENTRY_FORWARD_COUNT)
-		 || (Turn_Tick >= CAR_TURN_ENTRY_MAX_TICKS))
-		{
-			Turn_Last_Forward_Count = Turn_Forward_Count;
-			Turn_Tick = 0;
-			Line_State = CAR_LINE_STATE_FIXED_TURN;
-		}
-		return;
-	}
-
 	Line_Mode = (Turn_Direction == CAR_TURN_LEFT) ? 'L' : 'R';
 	Car_SetTurnPWM(Turn_Direction, CAR_FIXED_TURN_PWM);
 	if (Turn_Tick >= CAR_FIXED_TURN_TICKS)
@@ -462,9 +418,6 @@ static void OLED_ShowLineStateRToL(uint8_t X, uint8_t Y, uint8_t FontSize)
 
 static void OLED_Task(void)
 {
-	uint16_t DisplayForwardCount;
-
-	DisplayForwardCount = (Turn_Forward_Count != 0) ? Turn_Forward_Count : Turn_Last_Forward_Count;
 	OLED_Clear();
 	OLED_ShowString(0, 0, Car_Running ? "RUN  IR:" : "STOP IR:", OLED_6X8);
 	OLED_ShowLineStateRToL(54, 0, OLED_6X8);
@@ -473,8 +426,7 @@ static void OLED_Task(void)
 	OLED_Printf(0, 30, OLED_6X8, "PL:%+3d PR:%+3d", PWM_Left, PWM_Right);
 	OLED_Printf(0, 40, OLED_6X8, "L:%+5ld R:%+5ld",
 	            (long)Encoder_Left_Total, (long)Encoder_Right_Total);
-	OLED_Printf(0, 52, OLED_6X8, "M:%c C:%04d W:%04d",
-	            Line_Mode, DisplayForwardCount, CAR_TURN_ENTRY_FORWARD_COUNT);
+	OLED_Printf(0, 52, OLED_6X8, "M:%c", Line_Mode);
 	OLED_Update();
 }
 
