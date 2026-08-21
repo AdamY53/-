@@ -1,5 +1,31 @@
 # Codex Change Log
 
+## 2026-08-20 - DSH: Single-Channel Ultrasonic Polling + US Mode 1/2 (K3 switch)
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Ultrasonic polling changed from "3 consecutive ranging loops every 200ms"
+  to "1 ranging loop every 200ms" (front / enabled-side alternating,
+  `ULTRASONIC_ROUND_GAP_LOOPS = 200/20 - 1 = 9`). The line-following and
+  T-turn detection blind window drops from 3/10 (30%) to 1/10 (10%), which
+  was the main cause of the ~60% missed T-turn detection observed on the
+  car.
+- Added ultrasonic mode 1/2: mode 1 = front + left, mode 2 = front + right
+  (`CAR_US_MODE_LEFT` / `CAR_US_MODE_RIGHT`). Only the enabled side channel
+  is measured (`Car_UpdateUltrasonicOneStep`), so the unplugged module no
+  longer blocks for its 30ms echo timeout every round.
+- K3 short press now switches the ultrasonic mode (1 <-> 2) and jumps to the
+  ultrasonic display page; K3 long press (~1s) keeps the original
+  "show ultrasonic page" function. The ultrasonic OLED page shows the active
+  mode (`U1`/`U2`) and `L: OFF`/`R: OFF` for the disabled side.
+- Boot hint text updated to "K3 US Mode".
+
+Build/verification:
+- Reviewed in DSH agent session (brace/paren balance 100/100, 227/227);
+  ARMCC build to be re-run in Keil uVision before field testing.
+
 ## 2026-08-20 - DSH: T-Turn Detection Replaced with Pattern Matching (ported from 送药小车)
 
 Files changed:

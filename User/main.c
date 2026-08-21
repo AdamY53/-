@@ -18,7 +18,7 @@
 #define CAR_PWM_LIMIT              70.0f
 
 /* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 20ms，数值越大越不容易误触发。 */
-#define CAR_SHARP_CONFIRM_TICKS    2
+#define CAR_SHARP_CONFIRM_TICKS    1
 
 /* 左右 T 弯检测模式（参考送药小车_四段PID循迹版工程移植）。
  * 模式字符串按 R3,R2,R1,M,L1,L2,L3 位序解释：'1'=必须亮，'0'=必须灭，'-'=不关心。
@@ -45,7 +45,7 @@
 #define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
 #define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
 /* 可调窗口：检测到直角弯后先直行的编码器累计值，参考 OLED 调试页 C 数值调整。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 40
+#define CAR_TURN_ENTRY_FORWARD_COUNT 0
 /* 可调窗口：直行累计值接近目标值的允许误差，数值越大越早进入转弯。 */
 #define CAR_TURN_ENTRY_COUNT_WINDOW  8
 /* 可调窗口：编码器异常时最多直行周期数，每个周期约 20ms，防止一直直行。 */
@@ -53,19 +53,23 @@
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           34
 /* 可调窗口：方案一固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
-#define CAR_FIXED_TURN_TICKS         10
+#define CAR_FIXED_TURN_TICKS         6
 /* 可调窗口：每次完成90度转弯后的屏蔽周期数，屏蔽期内不再次触发90度转弯。 */
-#define CAR_TURN_COOLDOWN_TICKS      20
+#define CAR_TURN_COOLDOWN_TICKS      18
 
 /* 主循环固定时间片：约 20ms。延时放在测距调用之前，保证即使超声波阻塞测距，
  * 这个固定延时也不会被吃掉，整体周期尽量贴近 20ms。 */
 #define CAR_LOOP_PERIOD_MS           20
-/* 超声波整轮周期：每 200ms 完成一轮（前/左/右三路各测一次），每路 200ms 刷新一次。
- * 测距占用的主循环内暂停循迹状态机，避免控制周期被拉长。 */
+/* 超声波轮询周期：每 200ms 只测 1 路（前/启用侧交替），
+ * 循迹/T弯检测盲区从旧版 3/10 降到 1/10（10%），大幅降低 T 弯漏判概率。 */
 #define ULTRASONIC_ROUND_PERIOD_MS   200
-/* 一轮三路测完后间隔的主循环数：默认 7（3 个测距轮 + 7 个间隔轮 = 10 轮 ≈ 200ms）。
- * 想更频繁测距可改小，例如 5（则整轮 8 轮 ≈ 160ms）。 */
-#define ULTRASONIC_ROUND_GAP_LOOPS   (ULTRASONIC_ROUND_PERIOD_MS / CAR_LOOP_PERIOD_MS - 3)
+/* 每次测距后间隔的主循环数：默认 9（1 个测距轮 + 9 个间隔轮 = 10 轮 ≈ 200ms）。 */
+#define ULTRASONIC_ROUND_GAP_LOOPS   (ULTRASONIC_ROUND_PERIOD_MS / CAR_LOOP_PERIOD_MS - 1)
+/* 超声波模式：循迹过程中只启用 前+左（模式1）或 前+右（模式2），
+ * 未启用侧不再调用测距，避免未接模块 30ms 超时阻塞。
+ * 用 K3 短按在模式 1/2 间切换，K3 长按切到超声波显示页。 */
+#define CAR_US_MODE_LEFT            0
+#define CAR_US_MODE_RIGHT           1
 
 #define DISPLAY_PAGE_LINE          0
 #define DISPLAY_PAGE_ULTRASONIC    1
@@ -85,6 +89,7 @@ static uint16_t Front_Distance = US_INVALID_DISTANCE_CM;
 static uint16_t Left_Distance = US_INVALID_DISTANCE_CM;
 static uint16_t Right_Distance = US_INVALID_DISTANCE_CM;
 static uint8_t Ultrasonic_Index = 0;
+static uint8_t Car_UltrasonicMode = CAR_US_MODE_LEFT;   /* 默认模式1：前+左 */
 
 static int16_t Encoder_Right = 0;
 static int16_t Encoder_Left = 0;
@@ -211,17 +216,21 @@ static void Car_UpdateUltrasonicOneStep(void)
 	{
 		Front_Distance = Ultrasonic_GetDistanceCm(US_CH_FRONT);
 	}
-	else if (Ultrasonic_Index == 1)
-	{
-		Left_Distance = Ultrasonic_GetDistanceCm(US_CH_LEFT);
-	}
 	else
 	{
-		Right_Distance = Ultrasonic_GetDistanceCm(US_CH_RIGHT);
+		/* 只测当前模式启用的侧向通道，未启用侧不调用，避免 30ms 超时阻塞 */
+		if (Car_UltrasonicMode == CAR_US_MODE_LEFT)
+		{
+			Left_Distance = Ultrasonic_GetDistanceCm(US_CH_LEFT);
+		}
+		else
+		{
+			Right_Distance = Ultrasonic_GetDistanceCm(US_CH_RIGHT);
+		}
 	}
 
 	Ultrasonic_Index++;
-	if (Ultrasonic_Index >= 3)
+	if (Ultrasonic_Index >= 2)
 	{
 		Ultrasonic_Index = 0;
 	}
@@ -534,11 +543,20 @@ static void OLED_Task(void)
 	}
 	else
 	{
-		OLED_Printf(0, 0, OLED_8X16, "%s US3",
-		            Car_Running ? "RUN " : "STOP");
+		OLED_Printf(0, 0, OLED_8X16, "%s U%d",
+		            Car_Running ? "RUN " : "STOP",
+		            (Car_UltrasonicMode == CAR_US_MODE_LEFT) ? 1 : 2);
 		OLED_ShowUltrasonicLine(16, 'F', US_CH_FRONT, Front_Distance);
-		OLED_ShowUltrasonicLine(32, 'L', US_CH_LEFT, Left_Distance);
-		OLED_ShowUltrasonicLine(48, 'R', US_CH_RIGHT, Right_Distance);
+		if (Car_UltrasonicMode == CAR_US_MODE_LEFT)
+		{
+			OLED_ShowUltrasonicLine(32, 'L', US_CH_LEFT, Left_Distance);
+			OLED_ShowString(0, 48, "R: OFF", OLED_8X16);
+		}
+		else
+		{
+			OLED_ShowString(0, 32, "L: OFF", OLED_8X16);
+			OLED_ShowUltrasonicLine(48, 'R', US_CH_RIGHT, Right_Distance);
+		}
 	}
 	OLED_Update();
 }
@@ -546,9 +564,11 @@ static void OLED_Task(void)
 static void Key_Task(void)
 {
 	uint8_t KeyNum;
+	uint8_t LongKeyNum;
 
 	Key_Tick();
 	KeyNum = Key_GetNum();
+	LongKeyNum = Key_GetLongNum();
 	if (KeyNum == KEY_NUM_K1)
 	{
 		Car_Running = !Car_Running;
@@ -568,6 +588,13 @@ static void Key_Task(void)
 	}
 	else if (KeyNum == KEY_NUM_K3)
 	{
+		/* K3 短按：切换超声波模式 1（前+左）/ 2（前+右），并切到超声波显示页 */
+		Car_UltrasonicMode = !Car_UltrasonicMode;
+		Display_Page = DISPLAY_PAGE_ULTRASONIC;
+	}
+	else if (LongKeyNum == KEY_LONG_K3)
+	{
+		/* K3 长按（约1s）：切到超声波显示页 */
 		Display_Page = DISPLAY_PAGE_ULTRASONIC;
 	}
 }
@@ -589,7 +616,7 @@ int main(void)
 	OLED_Clear();
 	OLED_ShowString(0, 0, "Straight Track", OLED_8X16);
 	OLED_ShowString(0, 24, "K1 Start/Stop", OLED_8X16);
-	OLED_ShowString(0, 48, "K2 Line K3 US", OLED_8X16);
+	OLED_ShowString(0, 48, "K3 US Mode", OLED_8X16);
 	OLED_Update();
 	Delay_ms(800);
 
@@ -609,8 +636,8 @@ int main(void)
 		}
 		else
 		{
-			/* 测距轮：每 200ms 一轮，连续测前/左/右三路（每路最多阻塞约 30ms），
-			 * 测距期间暂停循迹状态机。 */
+			/* 测距轮：每 200ms 只测 1 路（前/启用侧交替，每路最多阻塞约 30ms），
+			 * 测距期间暂停循迹状态机，检测盲区仅 1/10，T 弯不易漏判。 */
 			Ultrasonic_Measuring = 1;
 			Car_UpdateUltrasonicOneStep();
 			if (Ultrasonic_Index == 0)
