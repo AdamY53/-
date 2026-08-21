@@ -1,5 +1,41 @@
 # Codex Change Log
 
+## 2026-08-20 - DSH: T-Turn Detection Replaced with Pattern Matching (ported from 送药小车)
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Removed the old "count active sensors" 90-degree detection
+  (`CAR_SHARP_GROUP_ACTIVE_MIN`, `Car_CountLeftTurnSensors`,
+  `Car_CountRightTurnSensors`).
+- Ported the left/right T-branch pattern matching from the
+  送药小车_四段PID循迹版 project:
+  - `Car_GetLineSensorMask` / `Car_MatchDisplayPatternByMask` /
+    `Car_MatchEnabledDisplayPattern`: bit-order pattern strings
+    (R3,R2,R1,M,L1,L2,L3; `1`=must be on, `0`=must be off, `-`=don't care),
+    each pattern has an `ENABLE` switch.
+  - Left T (physical left sensors on): `"000-111"` + `"0000011"` enabled.
+  - Right T (physical right sensors on): `"111-000"` + `"1100000"` enabled.
+  - Note: in the 送药小车 code the LEFT_T/RIGHT_T names are opposite to the
+    physical bit order, and its turn direction comes from a pre-set route
+    table, not from the T signal. Here the groups follow the 避障小车 physical
+    direction (right side on -> turn right), and the direction mapping is
+    exposed as `CAR_T_LEFT_ACTION` / `CAR_T_RIGHT_ACTION` so a reversed car
+    only needs one macro change.
+- Kept the confirm window `CAR_SHARP_CONFIRM_TICKS = 2` (a T signal must be
+  seen for 2 consecutive loops or the counters reset), the hover guard
+  (`Gray_ActiveCount < 2` clears both counters), and the existing
+  two-stage turn action (approach straight by encoder window
+  `CAR_TURN_ENTRY_FORWARD_COUNT`, then pivot with `CAR_FIXED_TURN_PWM` /
+  `CAR_FIXED_TURN_TICKS`, then `CAR_TURN_COOLDOWN_TICKS` ignore window).
+- The straight-line following logic (PD steering, encoder balance, lost-line
+  stop) was NOT modified.
+
+Build/verification:
+- Reviewed in DSH agent session (brace/paren balance checked); ARMCC build
+  to be re-run in Keil uVision before field testing.
+
 ## 2026-08-20 - DSH: Ultrasonic Out of Control Loop, Fixed 20ms Slice, Hover Guard
 
 Files changed:

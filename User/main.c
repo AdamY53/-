@@ -19,8 +19,31 @@
 
 /* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 20ms，数值越大越不容易误触发。 */
 #define CAR_SHARP_CONFIRM_TICKS    2
-/* 可调窗口：M+左侧三路或 M+右侧三路中至少几个高电平才允许触发90度转弯。 */
-#define CAR_SHARP_GROUP_ACTIVE_MIN 3
+
+/* 左右 T 弯检测模式（参考送药小车_四段PID循迹版工程移植）。
+ * 模式字符串按 R3,R2,R1,M,L1,L2,L3 位序解释：'1'=必须亮，'0'=必须灭，'-'=不关心。
+ * 注意：送药小车代码里 LEFT_T 命名与物理位序相反，且其转弯方向由预置路线表决定；
+ * 这里按避障小车物理方向归组：右侧三路亮→右 T，左侧三路亮→左 T。 */
+#define CAR_RIGHT_T_PATTERN1_ENABLE 0
+#define CAR_RIGHT_T_PATTERN1        "1111000" /* 位序：R3R2R1M 亮（未启用） */
+#define CAR_RIGHT_T_PATTERN2_ENABLE 1
+#define CAR_RIGHT_T_PATTERN2        "111-000" /* 右 T：右侧三路亮，左侧灭，M 不关心 */
+#define CAR_RIGHT_T_PATTERN3_ENABLE 1
+#define CAR_RIGHT_T_PATTERN3        "1100000" /* 右 T（宽松）：R3R2 亮 */
+#define CAR_RIGHT_T_PATTERN4_ENABLE 0
+#define CAR_RIGHT_T_PATTERN4        "-------" /* 备用自定义右 T 信号 */
+#define CAR_LEFT_T_PATTERN1_ENABLE  0
+#define CAR_LEFT_T_PATTERN1         "0001111" /* 位序：ML1L2L3 亮（未启用） */
+#define CAR_LEFT_T_PATTERN2_ENABLE  1
+#define CAR_LEFT_T_PATTERN2         "000-111" /* 左 T：左侧三路亮，右侧灭，M 不关心 */
+#define CAR_LEFT_T_PATTERN3_ENABLE  1
+#define CAR_LEFT_T_PATTERN3         "0000011" /* 左 T（宽松）：L2L3 亮 */
+#define CAR_LEFT_T_PATTERN4_ENABLE  0
+#define CAR_LEFT_T_PATTERN4         "-------" /* 备用自定义左 T 信号 */
+
+/* 可调窗口：T 弯方向映射。若实车转弯方向相反，只改这两个宏即可。 */
+#define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
+#define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
 /* 可调窗口：检测到直角弯后先直行的编码器累计值，参考 OLED 调试页 C 数值调整。 */
 #define CAR_TURN_ENTRY_FORWARD_COUNT 40
 /* 可调窗口：直行累计值接近目标值的允许误差，数值越大越早进入转弯。 */
@@ -224,20 +247,80 @@ static int16_t Car_CalcLineError(void)
 	return PositionSum / Gray_ActiveCount;
 }
 
-static uint8_t Car_CountLeftTurnSensors(void)
+static uint8_t Car_GetLineSensorMask(void)
 {
-	return Gray_Sensor[GRAY_IDX_L3]
-	     + Gray_Sensor[GRAY_IDX_L2]
-	     + Gray_Sensor[GRAY_IDX_L1]
-	     + Gray_Sensor[GRAY_IDX_M];
+	uint8_t Mask = 0;
+	uint8_t i;
+
+	for (i = 0; i < GRAY_SENSOR_COUNT; i++)
+	{
+		if (Gray_Sensor[i])
+		{
+			Mask |= (uint8_t)(1u << i);
+		}
+	}
+	return Mask;
 }
 
-static uint8_t Car_CountRightTurnSensors(void)
+/* 按 R3,R2,R1,M,L1,L2,L3 位序匹配模式字符串：'1'=必须亮，'0'=必须灭，'-'=不关心。
+ * 移植自送药小车_四段PID循迹版工程的 Car_MatchDisplayPatternByMask。 */
+static uint8_t Car_MatchDisplayPatternByMask(uint8_t Mask, const char *Pattern)
 {
-	return Gray_Sensor[GRAY_IDX_R1]
-	     + Gray_Sensor[GRAY_IDX_R2]
-	     + Gray_Sensor[GRAY_IDX_R3]
-	     + Gray_Sensor[GRAY_IDX_M];
+	uint8_t i;
+	const uint8_t Order[GRAY_SENSOR_COUNT] = {
+		GRAY_IDX_R3, GRAY_IDX_R2, GRAY_IDX_R1, GRAY_IDX_M,
+		GRAY_IDX_L1, GRAY_IDX_L2, GRAY_IDX_L3
+	};
+
+	if (Pattern == 0) {return 0;}
+	for (i = 0; i < GRAY_SENSOR_COUNT; i++)
+	{
+		if (Pattern[i] == '1')
+		{
+			if ((Mask & (uint8_t)(1u << Order[i])) == 0) {return 0;}
+		}
+		else if (Pattern[i] == '0')
+		{
+			if (Mask & (uint8_t)(1u << Order[i])) {return 0;}
+		}
+		else if (Pattern[i] == '\0')
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static uint8_t Car_MatchEnabledDisplayPattern(uint8_t Mask, const char *Pattern, uint8_t Enable)
+{
+	if (!Enable) {return 0;}
+	return Car_MatchDisplayPatternByMask(Mask, Pattern);
+}
+
+/* 左 T：物理左侧亮（L1/L2/L3），右侧灭。触发左转。 */
+static uint8_t Car_IsLeftTBranchSignal(void)
+{
+	uint8_t Mask;
+
+	Mask = Car_GetLineSensorMask();
+	if (Car_MatchEnabledDisplayPattern(Mask, CAR_LEFT_T_PATTERN1, CAR_LEFT_T_PATTERN1_ENABLE)) {return 1;}
+	if (Car_MatchEnabledDisplayPattern(Mask, CAR_LEFT_T_PATTERN2, CAR_LEFT_T_PATTERN2_ENABLE)) {return 1;}
+	if (Car_MatchEnabledDisplayPattern(Mask, CAR_LEFT_T_PATTERN3, CAR_LEFT_T_PATTERN3_ENABLE)) {return 1;}
+	if (Car_MatchEnabledDisplayPattern(Mask, CAR_LEFT_T_PATTERN4, CAR_LEFT_T_PATTERN4_ENABLE)) {return 1;}
+	return 0;
+}
+
+/* 右 T：物理右侧亮（R1/R2/R3），左侧灭。触发右转。 */
+static uint8_t Car_IsRightTBranchSignal(void)
+{
+	uint8_t Mask;
+
+	Mask = Car_GetLineSensorMask();
+	if (Car_MatchEnabledDisplayPattern(Mask, CAR_RIGHT_T_PATTERN1, CAR_RIGHT_T_PATTERN1_ENABLE)) {return 1;}
+	if (Car_MatchEnabledDisplayPattern(Mask, CAR_RIGHT_T_PATTERN2, CAR_RIGHT_T_PATTERN2_ENABLE)) {return 1;}
+	if (Car_MatchEnabledDisplayPattern(Mask, CAR_RIGHT_T_PATTERN3, CAR_RIGHT_T_PATTERN3_ENABLE)) {return 1;}
+	if (Car_MatchEnabledDisplayPattern(Mask, CAR_RIGHT_T_PATTERN4, CAR_RIGHT_T_PATTERN4_ENABLE)) {return 1;}
+	return 0;
 }
 
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
@@ -275,8 +358,8 @@ static void Car_FinishSharpTurn(void)
 
 static uint8_t Car_UpdateSharpTurnDetect(void)
 {
-	uint8_t LeftCount;
-	uint8_t RightCount;
+	uint8_t LeftT;
+	uint8_t RightT;
 
 	/* 悬空保护：有效灰度数少于 2 时立刻清零左右确认计数，
 	 * 防止小车被拿起/悬空时灰度误读导致 90 度转弯误触发。 */
@@ -287,26 +370,26 @@ static uint8_t Car_UpdateSharpTurnDetect(void)
 		return 0;
 	}
 
-	LeftCount = Car_CountLeftTurnSensors();
-	RightCount = Car_CountRightTurnSensors();
+	LeftT = Car_IsLeftTBranchSignal();
+	RightT = Car_IsRightTBranchSignal();
 
-	if ((LeftCount >= CAR_SHARP_GROUP_ACTIVE_MIN) && (RightCount < CAR_SHARP_GROUP_ACTIVE_MIN))
+	if (LeftT && !RightT)
 	{
 		Sharp_Left_Count++;
 		Sharp_Right_Count = 0;
 		if (Sharp_Left_Count >= CAR_SHARP_CONFIRM_TICKS)
 		{
-			Car_StartSharpTurn(CAR_TURN_LEFT);
+			Car_StartSharpTurn(CAR_T_LEFT_ACTION);
 			return 1;
 		}
 	}
-	else if ((RightCount >= CAR_SHARP_GROUP_ACTIVE_MIN) && (LeftCount < CAR_SHARP_GROUP_ACTIVE_MIN))
+	else if (RightT && !LeftT)
 	{
 		Sharp_Right_Count++;
 		Sharp_Left_Count = 0;
 		if (Sharp_Right_Count >= CAR_SHARP_CONFIRM_TICKS)
 		{
-			Car_StartSharpTurn(CAR_TURN_RIGHT);
+			Car_StartSharpTurn(CAR_T_RIGHT_ACTION);
 			return 1;
 		}
 	}
