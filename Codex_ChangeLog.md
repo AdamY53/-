@@ -1,5 +1,30 @@
 # Codex Change Log
 
+## 2026-08-20 - DSH: Ultrasonic Fully Disabled, Focus on Basic Line Tracking
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Removed ALL ultrasonic usage from `main.c` to rule out the ultrasonic
+  modules while tuning the basic line-following:
+  - Deleted the ultrasonic OLED display page and `OLED_ShowUltrasonicLine`.
+  - Deleted the 200ms ranging loop in `main()`: the line-following/T-turn
+    state machine now runs every 20ms loop with no detection blind window.
+  - Deleted the US mode 1/2 logic, `Car_UpdateUltrasonicOneStep`, the
+    distance globals, the US macros, and the `Ultrasonic.h` include.
+  - K3/K2 page switching removed; only K1 start/stop remains. The OLED shows
+    only the line debug page (IR pattern, E/D, S/B, PL/PR, encoders, M/C/W).
+- Kept the ultrasonic driver files (`Hardware/Ultrasonic.c/.h`) untouched so
+  the modules can be re-enabled later.
+- Kept all current tuning: `CAR_SHARP_CONFIRM_TICKS=1`,
+  `CAR_TURN_ENTRY_FORWARD_COUNT=0`, `CAR_FIXED_TURN_PWM=34`,
+  `CAR_FIXED_TURN_TICKS=13`, `CAR_TURN_COOLDOWN_TICKS=18`.
+
+Build/verification:
+- Reviewed in DSH agent session (brace/paren balance 79/79, 191/191);
+  ARMCC build to be re-run in Keil uVision before field testing.
+
 ## 2026-08-20 - DSH: Single-Channel Ultrasonic Polling + US Mode 1/2 (K3 switch)
 
 Files changed:
