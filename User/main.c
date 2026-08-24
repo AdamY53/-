@@ -7,7 +7,7 @@
 #include "Grayscale.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               36.0f
+#define CAR_BASE_PWM               39.0f
 #define CAR_LINE_KP                0.090f
 #define CAR_LINE_KD                0.180f
 #define CAR_ENCODER_BALANCE_KP     0.350f
@@ -46,9 +46,9 @@
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           30
 /* 可调窗口：方案一固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
-#define CAR_FIXED_TURN_TICKS         13
+#define CAR_FIXED_TURN_TICKS         16
 /* 可调窗口：每次完成90度转弯后的屏蔽周期数，屏蔽期内不再次触发90度转弯。 */
-#define CAR_TURN_COOLDOWN_TICKS      18
+#define CAR_TURN_COOLDOWN_TICKS      19
 
 /* 主循环固定时间片：约 20ms。超声波已停用（专注循迹调试），循迹状态机每轮都运行。 */
 #define CAR_LOOP_PERIOD_MS           20
@@ -359,13 +359,6 @@ static void Car_LineFollowStraight(void)
 	if (Line_State != CAR_LINE_STATE_FOLLOW)
 	{
 		Car_RunSharpTurn();
-		return;
-	}
-
-	if (Gray_ActiveCount == 0)
-	{
-		Car_ResetLineController();
-		Car_Stop();
 		return;
 	}
 

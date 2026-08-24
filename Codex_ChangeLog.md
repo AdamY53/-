@@ -1,5 +1,22 @@
 # Codex Change Log
 
+## 2026-08-24 - DSH: Remove All-Zero Line Stop for Debugging
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Deleted the "all grayscale sensors low -> stop" branch from the line
+  following loop.
+- The car now keeps running the line-following state machine even when the
+  seven sensors are all zero, so you can check whether the 90-degree turn
+  detector is being affected by an all-low signal pattern.
+- No turn tuning windows were changed in this edit.
+
+Build/verification:
+- `User/main.c` compiled successfully with ARMCC to
+  `Objects/codex_main_no_zero_stop.o`.
+
 ## 2026-08-20 - DSH: Remove Dead APPROACH Turn Code (trigger-then-pivot only)
 
 Files changed:
