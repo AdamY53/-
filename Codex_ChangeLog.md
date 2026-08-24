@@ -1,5 +1,25 @@
 # Codex Change Log
 
+## 2026-08-24 - H3M: T Branch Forward Entry by OLED Encoder Counts
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Created branch `H3M` from the current `DSH` line-tracking work.
+- Replaced the T-branch detector with a simpler count-based rule:
+  `M+L1+L2+L3` or `M+R1+R2+R3` must reach 3 active sensors, with
+  consecutive confirmation before the turn begins.
+- Restored a fixed forward-entry stage before the turn. The entry distance is
+  measured from the OLED fifth-line left/right cumulative encoder counts, so
+  the tuning window matches what you see during OLED testing.
+- Kept the fixed differential turn stage and the post-turn cooldown window.
+- OLED now shows `C` as the active or last saved forward-entry count and `W`
+  as the target window.
+
+Build/verification:
+- `User/main.c` compiled successfully with ARMCC to `Objects/H3M_main.o`.
+
 ## 2026-08-24 - DSH: Remove All-Zero Line Stop for Debugging
 
 Files changed:

@@ -7,7 +7,7 @@
 #include "Grayscale.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               39.0f
+#define CAR_BASE_PWM               33.0f
 #define CAR_LINE_KP                0.090f
 #define CAR_LINE_KD                0.180f
 #define CAR_ENCODER_BALANCE_KP     0.350f
@@ -17,44 +17,28 @@
 #define CAR_PWM_LIMIT              70.0f
 
 /* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 20ms，数值越大越不容易误触发。 */
-#define CAR_SHARP_CONFIRM_TICKS    1
-
-/* 左右 T 弯检测模式（参考送药小车_四段PID循迹版工程移植）。
- * 模式字符串按 R3,R2,R1,M,L1,L2,L3 位序解释：'1'=必须亮，'0'=必须灭，'-'=不关心。
- * 注意：送药小车代码里 LEFT_T 命名与物理位序相反，且其转弯方向由预置路线表决定；
- * 这里按避障小车物理方向归组：右侧三路亮→右 T，左侧三路亮→左 T。 */
-#define CAR_RIGHT_T_PATTERN1_ENABLE 0
-#define CAR_RIGHT_T_PATTERN1        "1111000" /* 位序：R3R2R1M 亮（未启用） */
-#define CAR_RIGHT_T_PATTERN2_ENABLE 1
-#define CAR_RIGHT_T_PATTERN2        "111-000" /* 右 T：右侧三路亮，左侧灭，M 不关心 */
-#define CAR_RIGHT_T_PATTERN3_ENABLE 1
-#define CAR_RIGHT_T_PATTERN3        "1100000" /* 右 T（宽松）：R3R2 亮 */
-#define CAR_RIGHT_T_PATTERN4_ENABLE 0
-#define CAR_RIGHT_T_PATTERN4        "-------" /* 备用自定义右 T 信号 */
-#define CAR_LEFT_T_PATTERN1_ENABLE  0
-#define CAR_LEFT_T_PATTERN1         "0001111" /* 位序：ML1L2L3 亮（未启用） */
-#define CAR_LEFT_T_PATTERN2_ENABLE  1
-#define CAR_LEFT_T_PATTERN2         "000-111" /* 左 T：左侧三路亮，右侧灭，M 不关心 */
-#define CAR_LEFT_T_PATTERN3_ENABLE  1
-#define CAR_LEFT_T_PATTERN3         "0000011" /* 左 T（宽松）：L2L3 亮 */
-#define CAR_LEFT_T_PATTERN4_ENABLE  0
-#define CAR_LEFT_T_PATTERN4         "-------" /* 备用自定义左 T 信号 */
-
-/* 可调窗口：T 弯方向映射。若实车转弯方向相反，只改这两个宏即可。 */
-#define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
-#define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
+#define CAR_SHARP_CONFIRM_TICKS    2
+/* 可调窗口：T 路口判定时，M+左侧三路或 M+右侧三路中至少几个高电平才触发。 */
+#define CAR_SHARP_GROUP_ACTIVE_MIN 3
+/* 可调窗口：检测到 T 路口后先前进的编码器累计值，单位和 OLED 第五行 L/R 显示一致。 */
+#define CAR_TURN_ENTRY_FORWARD_COUNT 120
+/* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
+#define CAR_TURN_ENTRY_COUNT_WINDOW  8
+/* 可调窗口：编码器异常时最大前探周期数，每个周期约 20ms，防止一直前进。 */
+#define CAR_TURN_ENTRY_MAX_TICKS     20
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           30
-/* 可调窗口：方案一固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
-#define CAR_FIXED_TURN_TICKS         16
-/* 可调窗口：每次完成90度转弯后的屏蔽周期数，屏蔽期内不再次触发90度转弯。 */
-#define CAR_TURN_COOLDOWN_TICKS      19
+/* 可调窗口：固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
+#define CAR_FIXED_TURN_TICKS         14
+/* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，屏蔽期内不再次触发 90 度转弯。 */
+#define CAR_TURN_COOLDOWN_TICKS      23
 
-/* 主循环固定时间片：约 20ms。超声波已停用（专注循迹调试），循迹状态机每轮都运行。 */
+/* 主循环固定时间片：约 20ms。当前仅做循迹和 T 路口逻辑。 */
 #define CAR_LOOP_PERIOD_MS           20
 
 #define CAR_LINE_STATE_FOLLOW      0
-#define CAR_LINE_STATE_FIXED_TURN  1
+#define CAR_LINE_STATE_APPROACH    1
+#define CAR_LINE_STATE_FIXED_TURN  2
 
 #define CAR_TURN_NONE              0
 #define CAR_TURN_LEFT              1
@@ -79,6 +63,10 @@ static uint8_t Line_State = CAR_LINE_STATE_FOLLOW;
 static uint8_t Turn_Direction = CAR_TURN_NONE;
 static uint8_t Turn_Tick = 0;
 static uint8_t Turn_Cooldown_Tick = 0;
+static int32_t Turn_Entry_Left_Total = 0;
+static int32_t Turn_Entry_Right_Total = 0;
+static uint16_t Turn_Forward_Count = 0;
+static uint16_t Turn_Last_Forward_Count = 0;
 static uint8_t Sharp_Left_Count = 0;
 static uint8_t Sharp_Right_Count = 0;
 static char Line_Mode = 'F';
@@ -143,6 +131,9 @@ static void Car_ResetLineController(void)
 	Turn_Direction = CAR_TURN_NONE;
 	Turn_Tick = 0;
 	Turn_Cooldown_Tick = 0;
+	Turn_Entry_Left_Total = 0;
+	Turn_Entry_Right_Total = 0;
+	Turn_Forward_Count = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
 	Line_Mode = 'F';
@@ -160,6 +151,10 @@ static void Car_ResetEncoderTotals(void)
 {
 	Encoder_Right_Total = 0;
 	Encoder_Left_Total = 0;
+	Turn_Entry_Left_Total = 0;
+	Turn_Entry_Right_Total = 0;
+	Turn_Forward_Count = 0;
+	Turn_Last_Forward_Count = 0;
 }
 
 static int16_t Car_CalcLineError(void)
@@ -182,80 +177,20 @@ static int16_t Car_CalcLineError(void)
 	return PositionSum / Gray_ActiveCount;
 }
 
-static uint8_t Car_GetLineSensorMask(void)
+static uint8_t Car_CountLeftTurnSensors(void)
 {
-	uint8_t Mask = 0;
-	uint8_t i;
-
-	for (i = 0; i < GRAY_SENSOR_COUNT; i++)
-	{
-		if (Gray_Sensor[i])
-		{
-			Mask |= (uint8_t)(1u << i);
-		}
-	}
-	return Mask;
+	return Gray_Sensor[GRAY_IDX_M]
+	     + Gray_Sensor[GRAY_IDX_L1]
+	     + Gray_Sensor[GRAY_IDX_L2]
+	     + Gray_Sensor[GRAY_IDX_L3];
 }
 
-/* 按 R3,R2,R1,M,L1,L2,L3 位序匹配模式字符串：'1'=必须亮，'0'=必须灭，'-'=不关心。
- * 移植自送药小车_四段PID循迹版工程的 Car_MatchDisplayPatternByMask。 */
-static uint8_t Car_MatchDisplayPatternByMask(uint8_t Mask, const char *Pattern)
+static uint8_t Car_CountRightTurnSensors(void)
 {
-	uint8_t i;
-	const uint8_t Order[GRAY_SENSOR_COUNT] = {
-		GRAY_IDX_R3, GRAY_IDX_R2, GRAY_IDX_R1, GRAY_IDX_M,
-		GRAY_IDX_L1, GRAY_IDX_L2, GRAY_IDX_L3
-	};
-
-	if (Pattern == 0) {return 0;}
-	for (i = 0; i < GRAY_SENSOR_COUNT; i++)
-	{
-		if (Pattern[i] == '1')
-		{
-			if ((Mask & (uint8_t)(1u << Order[i])) == 0) {return 0;}
-		}
-		else if (Pattern[i] == '0')
-		{
-			if (Mask & (uint8_t)(1u << Order[i])) {return 0;}
-		}
-		else if (Pattern[i] == '\0')
-		{
-			return 0;
-		}
-	}
-	return 1;
-}
-
-static uint8_t Car_MatchEnabledDisplayPattern(uint8_t Mask, const char *Pattern, uint8_t Enable)
-{
-	if (!Enable) {return 0;}
-	return Car_MatchDisplayPatternByMask(Mask, Pattern);
-}
-
-/* 左 T：物理左侧亮（L1/L2/L3），右侧灭。触发左转。 */
-static uint8_t Car_IsLeftTBranchSignal(void)
-{
-	uint8_t Mask;
-
-	Mask = Car_GetLineSensorMask();
-	if (Car_MatchEnabledDisplayPattern(Mask, CAR_LEFT_T_PATTERN1, CAR_LEFT_T_PATTERN1_ENABLE)) {return 1;}
-	if (Car_MatchEnabledDisplayPattern(Mask, CAR_LEFT_T_PATTERN2, CAR_LEFT_T_PATTERN2_ENABLE)) {return 1;}
-	if (Car_MatchEnabledDisplayPattern(Mask, CAR_LEFT_T_PATTERN3, CAR_LEFT_T_PATTERN3_ENABLE)) {return 1;}
-	if (Car_MatchEnabledDisplayPattern(Mask, CAR_LEFT_T_PATTERN4, CAR_LEFT_T_PATTERN4_ENABLE)) {return 1;}
-	return 0;
-}
-
-/* 右 T：物理右侧亮（R1/R2/R3），左侧灭。触发右转。 */
-static uint8_t Car_IsRightTBranchSignal(void)
-{
-	uint8_t Mask;
-
-	Mask = Car_GetLineSensorMask();
-	if (Car_MatchEnabledDisplayPattern(Mask, CAR_RIGHT_T_PATTERN1, CAR_RIGHT_T_PATTERN1_ENABLE)) {return 1;}
-	if (Car_MatchEnabledDisplayPattern(Mask, CAR_RIGHT_T_PATTERN2, CAR_RIGHT_T_PATTERN2_ENABLE)) {return 1;}
-	if (Car_MatchEnabledDisplayPattern(Mask, CAR_RIGHT_T_PATTERN3, CAR_RIGHT_T_PATTERN3_ENABLE)) {return 1;}
-	if (Car_MatchEnabledDisplayPattern(Mask, CAR_RIGHT_T_PATTERN4, CAR_RIGHT_T_PATTERN4_ENABLE)) {return 1;}
-	return 0;
+	return Gray_Sensor[GRAY_IDX_M]
+	     + Gray_Sensor[GRAY_IDX_R1]
+	     + Gray_Sensor[GRAY_IDX_R2]
+	     + Gray_Sensor[GRAY_IDX_R3];
 }
 
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
@@ -273,17 +208,21 @@ static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 static void Car_StartSharpTurn(uint8_t Direction)
 {
 	Car_ClearLinePD();
-	Line_State = CAR_LINE_STATE_FIXED_TURN;
+	Line_State = CAR_LINE_STATE_APPROACH;
 	Turn_Direction = Direction;
 	Turn_Tick = 0;
 	Turn_Cooldown_Tick = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
-	Line_Mode = (Direction == CAR_TURN_LEFT) ? 'L' : 'R';
+	Turn_Entry_Left_Total = Encoder_Left_Total;
+	Turn_Entry_Right_Total = Encoder_Right_Total;
+	Turn_Forward_Count = 0;
+	Line_Mode = 'A';
 }
 
 static void Car_FinishSharpTurn(void)
 {
+	Turn_Last_Forward_Count = Turn_Forward_Count;
 	Car_ResetLineController();
 	Turn_Cooldown_Tick = CAR_TURN_COOLDOWN_TICKS;
 	Line_Mode = 'K';
@@ -303,26 +242,26 @@ static uint8_t Car_UpdateSharpTurnDetect(void)
 		return 0;
 	}
 
-	LeftT = Car_IsLeftTBranchSignal();
-	RightT = Car_IsRightTBranchSignal();
+	LeftT = Car_CountLeftTurnSensors();
+	RightT = Car_CountRightTurnSensors();
 
-	if (LeftT && !RightT)
+	if ((LeftT >= CAR_SHARP_GROUP_ACTIVE_MIN) && (RightT < CAR_SHARP_GROUP_ACTIVE_MIN))
 	{
 		Sharp_Left_Count++;
 		Sharp_Right_Count = 0;
 		if (Sharp_Left_Count >= CAR_SHARP_CONFIRM_TICKS)
 		{
-			Car_StartSharpTurn(CAR_T_LEFT_ACTION);
+			Car_StartSharpTurn(CAR_TURN_LEFT);
 			return 1;
 		}
 	}
-	else if (RightT && !LeftT)
+	else if ((RightT >= CAR_SHARP_GROUP_ACTIVE_MIN) && (LeftT < CAR_SHARP_GROUP_ACTIVE_MIN))
 	{
 		Sharp_Right_Count++;
 		Sharp_Left_Count = 0;
 		if (Sharp_Right_Count >= CAR_SHARP_CONFIRM_TICKS)
 		{
-			Car_StartSharpTurn(CAR_T_RIGHT_ACTION);
+			Car_StartSharpTurn(CAR_TURN_RIGHT);
 			return 1;
 		}
 	}
@@ -338,6 +277,32 @@ static uint8_t Car_UpdateSharpTurnDetect(void)
 static void Car_RunSharpTurn(void)
 {
 	Turn_Tick++;
+	if (Line_State == CAR_LINE_STATE_APPROACH)
+	{
+		int32_t ForwardDelta;
+
+		Line_Mode = 'A';
+		ForwardDelta = ((Encoder_Left_Total - Turn_Entry_Left_Total)
+		              + (Encoder_Right_Total - Turn_Entry_Right_Total)) / 2;
+		if (ForwardDelta < 0)
+		{
+			ForwardDelta = 0;
+		}
+		if (ForwardDelta > 65535)
+		{
+			ForwardDelta = 65535;
+		}
+		Turn_Forward_Count = (uint16_t)ForwardDelta;
+		Car_SetForwardPWM(CAR_BASE_PWM, CAR_BASE_PWM);
+		if (((Turn_Forward_Count + CAR_TURN_ENTRY_COUNT_WINDOW) >= CAR_TURN_ENTRY_FORWARD_COUNT)
+		 || (Turn_Tick >= CAR_TURN_ENTRY_MAX_TICKS))
+		{
+			Turn_Tick = 0;
+			Line_State = CAR_LINE_STATE_FIXED_TURN;
+		}
+		return;
+	}
+
 	Line_Mode = (Turn_Direction == CAR_TURN_LEFT) ? 'L' : 'R';
 	Car_SetTurnPWM(Turn_Direction, CAR_FIXED_TURN_PWM);
 	if (Turn_Tick >= CAR_FIXED_TURN_TICKS)
@@ -411,6 +376,9 @@ static void OLED_ShowLineStateRToL(uint8_t X, uint8_t Y, uint8_t FontSize)
 
 static void OLED_Task(void)
 {
+	uint16_t DisplayForwardCount;
+
+	DisplayForwardCount = (Turn_Forward_Count != 0) ? Turn_Forward_Count : Turn_Last_Forward_Count;
 	OLED_Clear();
 	OLED_ShowString(0, 0, Car_Running ? "RUN  IR:" : "STOP IR:", OLED_6X8);
 	OLED_ShowLineStateRToL(54, 0, OLED_6X8);
@@ -419,7 +387,8 @@ static void OLED_Task(void)
 	OLED_Printf(0, 30, OLED_6X8, "PL:%+3d PR:%+3d", PWM_Left, PWM_Right);
 	OLED_Printf(0, 40, OLED_6X8, "L:%+5ld R:%+5ld",
 	            (long)Encoder_Left_Total, (long)Encoder_Right_Total);
-	OLED_Printf(0, 52, OLED_6X8, "M:%c", Line_Mode);
+	OLED_Printf(0, 52, OLED_6X8, "M:%c C:%04d W:%04d",
+	            Line_Mode, DisplayForwardCount, CAR_TURN_ENTRY_FORWARD_COUNT);
 	OLED_Update();
 }
 
