@@ -26,12 +26,15 @@
 #define CAR_TURN_ENTRY_COUNT_WINDOW  8
 /* 可调窗口：编码器异常时最大前探周期数，每个周期约 20ms，防止一直前进。 */
 #define CAR_TURN_ENTRY_MAX_TICKS     20
+/* 可调窗口：T 弯方向映射。若实车转弯方向相反，只改这两个宏即可。 */
+#define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
+#define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           30
 /* 可调窗口：固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
 #define CAR_FIXED_TURN_TICKS         14
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，屏蔽期内不再次触发 90 度转弯。 */
-#define CAR_TURN_COOLDOWN_TICKS      23
+#define CAR_TURN_COOLDOWN_TICKS      24
 
 /* 主循环固定时间片：约 20ms。当前仅做循迹和 T 路口逻辑。 */
 #define CAR_LOOP_PERIOD_MS           20
@@ -282,6 +285,8 @@ static void Car_RunSharpTurn(void)
 		int32_t ForwardDelta;
 
 		Line_Mode = 'A';
+		/* 这里直接用左右编码器累计值的平均数当“前进距离”。
+		 * OLED 第五行显示的 L/R 数值，就是你现场调这个窗口的依据。 */
 		ForwardDelta = ((Encoder_Left_Total - Turn_Entry_Left_Total)
 		              + (Encoder_Right_Total - Turn_Entry_Right_Total)) / 2;
 		if (ForwardDelta < 0)
@@ -385,6 +390,7 @@ static void OLED_Task(void)
 	OLED_Printf(0, 10, OLED_6X8, "E:%+4d D:%+4d", Line_Error, Line_Derivative);
 	OLED_Printf(0, 20, OLED_6X8, "S:%+3d B:%+3d", Line_Steer_PWM, Encoder_Balance_PWM);
 	OLED_Printf(0, 30, OLED_6X8, "PL:%+3d PR:%+3d", PWM_Left, PWM_Right);
+	/* 第五行：左右轮编码器累计值。这里就是 T 路口“先前进一段”的观测基准。 */
 	OLED_Printf(0, 40, OLED_6X8, "L:%+5ld R:%+5ld",
 	            (long)Encoder_Left_Total, (long)Encoder_Right_Total);
 	OLED_Printf(0, 52, OLED_6X8, "M:%c C:%04d W:%04d",
