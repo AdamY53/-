@@ -7,8 +7,8 @@
 #include "Grayscale.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               33.0f
-#define CAR_LINE_KP                0.090f
+#define CAR_BASE_PWM               30.0f
+#define CAR_LINE_KP                0.105f
 #define CAR_LINE_KD                0.180f
 #define CAR_ENCODER_BALANCE_KP     0.350f
 #define CAR_STEER_LIMIT            26.0f
@@ -17,9 +17,11 @@
 #define CAR_PWM_LIMIT              70.0f
 
 /* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 20ms，数值越大越不容易误触发。 */
-#define CAR_SHARP_CONFIRM_TICKS    2
+#define CAR_SHARP_CONFIRM_TICKS    1
 /* 可调窗口：T 路口判定时，M+左侧三路或 M+右侧三路中至少几个高电平才触发。 */
 #define CAR_SHARP_GROUP_ACTIVE_MIN 3
+/* 可调窗口：边缘双探头 T 路口兜底开关。1=最左两路或最右两路同时高电平也触发前进转弯。 */
+#define CAR_EDGE_PAIR_T_ENABLE     1
 /* 可调窗口：检测到 T 路口后先前进的编码器累计值，单位和 OLED 第五行 L/R 显示一致。 */
 #define CAR_TURN_ENTRY_FORWARD_COUNT 120
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
@@ -32,12 +34,12 @@
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           30
 /* 可调窗口：固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
-#define CAR_FIXED_TURN_TICKS         14
+#define CAR_FIXED_TURN_TICKS         21
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，屏蔽期内不再次触发 90 度转弯。 */
 #define CAR_TURN_COOLDOWN_TICKS      24
 
 /* 主循环固定时间片：约 20ms。当前仅做循迹和 T 路口逻辑。 */
-#define CAR_LOOP_PERIOD_MS           20
+#define CAR_LOOP_PERIOD_MS           10
 
 #define CAR_LINE_STATE_FOLLOW      0
 #define CAR_LINE_STATE_APPROACH    1
@@ -196,6 +198,20 @@ static uint8_t Car_CountRightTurnSensors(void)
 	     + Gray_Sensor[GRAY_IDX_R3];
 }
 
+static uint8_t Car_IsLeftEdgePairTSignal(void)
+{
+	/* 最左边两路同时高电平时，也认为遇到左侧 T 路口。
+	 * 这条兜底判定不看 L1/M/R1，避免中间三路循迹调整影响 T 路口触发。 */
+	return (Gray_Sensor[GRAY_IDX_L2] && Gray_Sensor[GRAY_IDX_L3]) ? 1 : 0;
+}
+
+static uint8_t Car_IsRightEdgePairTSignal(void)
+{
+	/* 最右边两路同时高电平时，也认为遇到右侧 T 路口。
+	 * 这条兜底判定不看 L1/M/R1，避免中间三路循迹调整影响 T 路口触发。 */
+	return (Gray_Sensor[GRAY_IDX_R2] && Gray_Sensor[GRAY_IDX_R3]) ? 1 : 0;
+}
+
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 {
 	if (Direction == CAR_TURN_LEFT)
@@ -233,6 +249,8 @@ static void Car_FinishSharpTurn(void)
 
 static uint8_t Car_UpdateSharpTurnDetect(void)
 {
+	uint8_t LeftTCount;
+	uint8_t RightTCount;
 	uint8_t LeftT;
 	uint8_t RightT;
 
@@ -245,10 +263,14 @@ static uint8_t Car_UpdateSharpTurnDetect(void)
 		return 0;
 	}
 
-	LeftT = Car_CountLeftTurnSensors();
-	RightT = Car_CountRightTurnSensors();
+	LeftTCount = Car_CountLeftTurnSensors();
+	RightTCount = Car_CountRightTurnSensors();
+	LeftT = (LeftTCount >= CAR_SHARP_GROUP_ACTIVE_MIN)
+	     || (CAR_EDGE_PAIR_T_ENABLE && Car_IsLeftEdgePairTSignal());
+	RightT = (RightTCount >= CAR_SHARP_GROUP_ACTIVE_MIN)
+	      || (CAR_EDGE_PAIR_T_ENABLE && Car_IsRightEdgePairTSignal());
 
-	if ((LeftT >= CAR_SHARP_GROUP_ACTIVE_MIN) && (RightT < CAR_SHARP_GROUP_ACTIVE_MIN))
+	if (LeftT && !RightT)
 	{
 		Sharp_Left_Count++;
 		Sharp_Right_Count = 0;
@@ -258,7 +280,7 @@ static uint8_t Car_UpdateSharpTurnDetect(void)
 			return 1;
 		}
 	}
-	else if ((RightT >= CAR_SHARP_GROUP_ACTIVE_MIN) && (LeftT < CAR_SHARP_GROUP_ACTIVE_MIN))
+	else if (RightT && !LeftT)
 	{
 		Sharp_Right_Count++;
 		Sharp_Left_Count = 0;
