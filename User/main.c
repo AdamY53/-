@@ -7,8 +7,8 @@
 #include "Grayscale.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               33.0f
-#define CAR_LINE_KP                0.090f
+#define CAR_BASE_PWM               30.0f
+#define CAR_LINE_KP                0.100f
 #define CAR_LINE_KD                0.180f
 #define CAR_ENCODER_BALANCE_KP     0.350f
 #define CAR_STEER_LIMIT            26.0f
@@ -17,22 +17,26 @@
 #define CAR_PWM_LIMIT              70.0f
 
 /* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 20ms，数值越大越不容易误触发。 */
-#define CAR_SHARP_CONFIRM_TICKS    2
+#define CAR_SHARP_CONFIRM_TICKS    1
 /* 可调窗口：T 路口判定时，M+左侧三路或 M+右侧三路中至少几个高电平才触发。 */
 #define CAR_SHARP_GROUP_ACTIVE_MIN 3
+/* 可调窗口：疑似 T 路口进入锁存后，在锁存窗口内同方向信号累计出现几次才确认。 */
+#define CAR_T_CANDIDATE_CONFIRM_TICKS 2
+/* 可调窗口：疑似 T 路口锁存周期数，每个周期约 20ms；锁存期内暂停普通差速循迹，先保持直行继续看信号。 */
+#define CAR_T_CANDIDATE_HOLD_TICKS    4
 /* 可调窗口：检测到 T 路口后先前进的编码器累计值，单位和 OLED 第五行 L/R 显示一致。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 120
+#define CAR_TURN_ENTRY_FORWARD_COUNT 145
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
-#define CAR_TURN_ENTRY_COUNT_WINDOW  8
+#define CAR_TURN_ENTRY_COUNT_WINDOW  30
 /* 可调窗口：编码器异常时最大前探周期数，每个周期约 20ms，防止一直前进。 */
 #define CAR_TURN_ENTRY_MAX_TICKS     20
 /* 可调窗口：T 弯方向映射。若实车转弯方向相反，只改这两个宏即可。 */
 #define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
 #define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
-#define CAR_FIXED_TURN_PWM           30
+#define CAR_FIXED_TURN_PWM           28
 /* 可调窗口：固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
-#define CAR_FIXED_TURN_TICKS         14
+#define CAR_FIXED_TURN_TICKS         15
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，屏蔽期内不再次触发 90 度转弯。 */
 #define CAR_TURN_COOLDOWN_TICKS      24
 
@@ -40,8 +44,9 @@
 #define CAR_LOOP_PERIOD_MS           20
 
 #define CAR_LINE_STATE_FOLLOW      0
-#define CAR_LINE_STATE_APPROACH    1
-#define CAR_LINE_STATE_FIXED_TURN  2
+#define CAR_LINE_STATE_CANDIDATE   1
+#define CAR_LINE_STATE_APPROACH    2
+#define CAR_LINE_STATE_FIXED_TURN  3
 
 #define CAR_TURN_NONE              0
 #define CAR_TURN_LEFT              1
@@ -66,6 +71,9 @@ static uint8_t Line_State = CAR_LINE_STATE_FOLLOW;
 static uint8_t Turn_Direction = CAR_TURN_NONE;
 static uint8_t Turn_Tick = 0;
 static uint8_t Turn_Cooldown_Tick = 0;
+static uint8_t Turn_Candidate_Direction = CAR_TURN_NONE;
+static uint8_t Turn_Candidate_Tick = 0;
+static uint8_t Turn_Candidate_Match_Count = 0;
 static int32_t Turn_Entry_Left_Total = 0;
 static int32_t Turn_Entry_Right_Total = 0;
 static uint16_t Turn_Forward_Count = 0;
@@ -134,6 +142,9 @@ static void Car_ResetLineController(void)
 	Turn_Direction = CAR_TURN_NONE;
 	Turn_Tick = 0;
 	Turn_Cooldown_Tick = 0;
+	Turn_Candidate_Direction = CAR_TURN_NONE;
+	Turn_Candidate_Tick = 0;
+	Turn_Candidate_Match_Count = 0;
 	Turn_Entry_Left_Total = 0;
 	Turn_Entry_Right_Total = 0;
 	Turn_Forward_Count = 0;
@@ -196,6 +207,31 @@ static uint8_t Car_CountRightTurnSensors(void)
 	     + Gray_Sensor[GRAY_IDX_R3];
 }
 
+static uint8_t Car_GetTBranchDirection(void)
+{
+	uint8_t LeftT;
+	uint8_t RightT;
+
+	/* 悬空保护：有效灰度数少于 2 时不认为是 T 路口。 */
+	if (Gray_ActiveCount < 2)
+	{
+		return CAR_TURN_NONE;
+	}
+
+	LeftT = Car_CountLeftTurnSensors();
+	RightT = Car_CountRightTurnSensors();
+
+	if ((LeftT >= CAR_SHARP_GROUP_ACTIVE_MIN) && (RightT < CAR_SHARP_GROUP_ACTIVE_MIN))
+	{
+		return CAR_TURN_LEFT;
+	}
+	if ((RightT >= CAR_SHARP_GROUP_ACTIVE_MIN) && (LeftT < CAR_SHARP_GROUP_ACTIVE_MIN))
+	{
+		return CAR_TURN_RIGHT;
+	}
+	return CAR_TURN_NONE;
+}
+
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 {
 	if (Direction == CAR_TURN_LEFT)
@@ -208,13 +244,35 @@ static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 	}
 }
 
+static uint8_t Car_MapTSignalToAction(uint8_t Direction)
+{
+	if (Direction == CAR_TURN_LEFT) {return CAR_T_LEFT_ACTION;}
+	if (Direction == CAR_TURN_RIGHT) {return CAR_T_RIGHT_ACTION;}
+	return CAR_TURN_NONE;
+}
+
+static void Car_StartTCandidate(uint8_t Direction)
+{
+	Car_ClearLinePD();
+	Line_State = CAR_LINE_STATE_CANDIDATE;
+	Turn_Candidate_Direction = Direction;
+	Turn_Candidate_Tick = 0;
+	Turn_Candidate_Match_Count = 1;
+	Sharp_Left_Count = 0;
+	Sharp_Right_Count = 0;
+	Line_Mode = 'C';
+}
+
 static void Car_StartSharpTurn(uint8_t Direction)
 {
 	Car_ClearLinePD();
 	Line_State = CAR_LINE_STATE_APPROACH;
-	Turn_Direction = Direction;
+	Turn_Direction = Car_MapTSignalToAction(Direction);
 	Turn_Tick = 0;
 	Turn_Cooldown_Tick = 0;
+	Turn_Candidate_Direction = CAR_TURN_NONE;
+	Turn_Candidate_Tick = 0;
+	Turn_Candidate_Match_Count = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
 	Turn_Entry_Left_Total = Encoder_Left_Total;
@@ -233,38 +291,27 @@ static void Car_FinishSharpTurn(void)
 
 static uint8_t Car_UpdateSharpTurnDetect(void)
 {
-	uint8_t LeftT;
-	uint8_t RightT;
+	uint8_t Direction;
 
-	/* 悬空保护：有效灰度数少于 2 时立刻清零左右确认计数，
-	 * 防止小车被拿起/悬空时灰度误读导致 90 度转弯误触发。 */
-	if (Gray_ActiveCount < 2)
-	{
-		Sharp_Left_Count = 0;
-		Sharp_Right_Count = 0;
-		return 0;
-	}
+	Direction = Car_GetTBranchDirection();
 
-	LeftT = Car_CountLeftTurnSensors();
-	RightT = Car_CountRightTurnSensors();
-
-	if ((LeftT >= CAR_SHARP_GROUP_ACTIVE_MIN) && (RightT < CAR_SHARP_GROUP_ACTIVE_MIN))
+	if (Direction == CAR_TURN_LEFT)
 	{
 		Sharp_Left_Count++;
 		Sharp_Right_Count = 0;
 		if (Sharp_Left_Count >= CAR_SHARP_CONFIRM_TICKS)
 		{
-			Car_StartSharpTurn(CAR_TURN_LEFT);
+			Car_StartTCandidate(CAR_TURN_LEFT);
 			return 1;
 		}
 	}
-	else if ((RightT >= CAR_SHARP_GROUP_ACTIVE_MIN) && (LeftT < CAR_SHARP_GROUP_ACTIVE_MIN))
+	else if (Direction == CAR_TURN_RIGHT)
 	{
 		Sharp_Right_Count++;
 		Sharp_Left_Count = 0;
 		if (Sharp_Right_Count >= CAR_SHARP_CONFIRM_TICKS)
 		{
-			Car_StartSharpTurn(CAR_TURN_RIGHT);
+			Car_StartTCandidate(CAR_TURN_RIGHT);
 			return 1;
 		}
 	}
@@ -279,6 +326,46 @@ static uint8_t Car_UpdateSharpTurnDetect(void)
 
 static void Car_RunSharpTurn(void)
 {
+	if (Line_State == CAR_LINE_STATE_CANDIDATE)
+	{
+		uint8_t Direction;
+
+		/* 疑似 T 路口锁存：这几拍先不要继续普通循迹修方向，
+		 * 小车保持直行，同时继续观察同方向 T 信号，避免路口瞬间漏判。 */
+		Turn_Candidate_Tick++;
+		Line_Mode = 'C';
+		Car_SetForwardPWM(CAR_BASE_PWM, CAR_BASE_PWM);
+		Direction = Car_GetTBranchDirection();
+		if (Direction == Turn_Candidate_Direction)
+		{
+			Turn_Candidate_Match_Count++;
+			if (Turn_Candidate_Match_Count >= CAR_T_CANDIDATE_CONFIRM_TICKS)
+			{
+				Car_StartSharpTurn(Turn_Candidate_Direction);
+			}
+		}
+		else if ((Direction != CAR_TURN_NONE) && (Direction != Turn_Candidate_Direction))
+		{
+			/* 如果锁存期内突然变成反方向 T，就按新方向重新锁存。 */
+			Turn_Candidate_Direction = Direction;
+			Turn_Candidate_Tick = 0;
+			Turn_Candidate_Match_Count = 1;
+		}
+		if ((Line_State == CAR_LINE_STATE_CANDIDATE)
+		 && (Turn_Candidate_Tick >= CAR_T_CANDIDATE_HOLD_TICKS))
+		{
+			/* 锁存窗口过了还没确认，退回普通循迹，防止把直线误当成路口。 */
+			Line_State = CAR_LINE_STATE_FOLLOW;
+			Turn_Candidate_Direction = CAR_TURN_NONE;
+			Turn_Candidate_Tick = 0;
+			Turn_Candidate_Match_Count = 0;
+			Sharp_Left_Count = 0;
+			Sharp_Right_Count = 0;
+			Line_Mode = 'F';
+		}
+		return;
+	}
+
 	Turn_Tick++;
 	if (Line_State == CAR_LINE_STATE_APPROACH)
 	{
@@ -340,7 +427,8 @@ static void Car_LineFollowStraight(void)
 	}
 	else if (Car_UpdateSharpTurnDetect())
 	{
-		Car_RunSharpTurn();
+		/* 本轮只进入疑似 T 锁存，不立刻二次确认；
+		 * 下一轮重新采样灰度后再确认，避免同一拍数据被算两次。 */
 		return;
 	}
 
