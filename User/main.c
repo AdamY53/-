@@ -8,7 +8,7 @@
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
 #define CAR_BASE_PWM               30.0f
-#define CAR_LINE_KP                0.100f
+#define CAR_LINE_KP                0.105f
 #define CAR_LINE_KD                0.180f
 #define CAR_ENCODER_BALANCE_KP     0.350f
 #define CAR_STEER_LIMIT            26.0f
@@ -23,9 +23,9 @@
 /* 可调窗口：疑似 T 路口进入锁存后，在锁存窗口内同方向信号累计出现几次才确认。 */
 #define CAR_T_CANDIDATE_CONFIRM_TICKS 2
 /* 可调窗口：疑似 T 路口锁存周期数，每个周期约 20ms；锁存期内暂停普通差速循迹，先保持直行继续看信号。 */
-#define CAR_T_CANDIDATE_HOLD_TICKS    4
+#define CAR_T_CANDIDATE_HOLD_TICKS    2
 /* 可调窗口：检测到 T 路口后先前进的编码器累计值，单位和 OLED 第五行 L/R 显示一致。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 145
+#define CAR_TURN_ENTRY_FORWARD_COUNT 125
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
 #define CAR_TURN_ENTRY_COUNT_WINDOW  30
 /* 可调窗口：编码器异常时最大前探周期数，每个周期约 20ms，防止一直前进。 */
@@ -34,9 +34,9 @@
 #define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
 #define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
-#define CAR_FIXED_TURN_PWM           28
+#define CAR_FIXED_TURN_PWM           30
 /* 可调窗口：固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
-#define CAR_FIXED_TURN_TICKS         15
+#define CAR_FIXED_TURN_TICKS         14
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，屏蔽期内不再次触发 90 度转弯。 */
 #define CAR_TURN_COOLDOWN_TICKS      24
 
