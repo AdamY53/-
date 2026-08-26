@@ -34,11 +34,11 @@
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           30
 /* 可调窗口：固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
-#define CAR_FIXED_TURN_TICKS         21
+#define CAR_FIXED_TURN_TICKS         20
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，屏蔽期内不再次触发 90 度转弯。 */
 #define CAR_TURN_COOLDOWN_TICKS      24
 
-/* 主循环固定时间片：约 20ms。当前仅做循迹和 T 路口逻辑。 */
+/* 主循环固定时间片：约 10ms。当前仅做循迹、路口和计时逻辑。 */
 #define CAR_LOOP_PERIOD_MS           10
 
 #define CAR_LINE_STATE_FOLLOW      0
@@ -48,6 +48,34 @@
 #define CAR_TURN_NONE              0
 #define CAR_TURN_LEFT              1
 #define CAR_TURN_RIGHT             2
+
+#define CAR_DISPLAY_PAGE_TRACK      0
+#define CAR_DISPLAY_PAGE_ROUTE      1
+
+#define CAR_ROUTE_MODE_COUNT        8
+#define CAR_ROUTE_SEGMENT_COUNT     4
+
+typedef struct
+{
+	char From;
+	char To;
+} CAR_ROUTE_STEP;
+
+static const char Car_RouteModeText[CAR_ROUTE_MODE_COUNT][8] = {
+	"A_TO_B", "B_TO_C", "C_TO_D", "D_TO_A",
+	"B_TO_A", "A_TO_D", "D_TO_C", "C_TO_B"
+};
+
+static const CAR_ROUTE_STEP Car_RouteMap[CAR_ROUTE_MODE_COUNT][CAR_ROUTE_SEGMENT_COUNT] = {
+	{{'A', 'B'}, {'B', 'C'}, {'C', 'D'}, {'D', 'A'}},
+	{{'B', 'C'}, {'C', 'D'}, {'D', 'A'}, {'A', 'B'}},
+	{{'C', 'D'}, {'D', 'A'}, {'A', 'B'}, {'B', 'C'}},
+	{{'D', 'A'}, {'A', 'B'}, {'B', 'C'}, {'C', 'D'}},
+	{{'B', 'A'}, {'A', 'D'}, {'D', 'C'}, {'C', 'B'}},
+	{{'A', 'D'}, {'D', 'C'}, {'C', 'B'}, {'B', 'A'}},
+	{{'D', 'C'}, {'C', 'B'}, {'B', 'A'}, {'A', 'D'}},
+	{{'C', 'B'}, {'B', 'A'}, {'A', 'D'}, {'D', 'C'}}
+};
 
 static uint8_t Car_Running = 0;
 
@@ -75,6 +103,16 @@ static uint16_t Turn_Last_Forward_Count = 0;
 static uint8_t Sharp_Left_Count = 0;
 static uint8_t Sharp_Right_Count = 0;
 static char Line_Mode = 'F';
+static uint8_t OLED_Page = CAR_DISPLAY_PAGE_TRACK;
+static uint8_t Route_SelectedMode = 0;
+static uint8_t Route_Active = 0;
+static uint8_t Route_Done = 0;
+static uint8_t Route_CurrentSegment = 0;
+static uint8_t Route_SegmentWaiting = 0;
+static uint8_t Route_JustStarted = 0;
+static uint32_t Route_CurrentMs = 0;
+static uint32_t Route_SegmentMs[CAR_ROUTE_SEGMENT_COUNT] = {0};
+static uint8_t Route_SegmentClosed[CAR_ROUTE_SEGMENT_COUNT] = {0};
 
 static float LimitFloat(float Value, float Min, float Max)
 {
@@ -162,6 +200,85 @@ static void Car_ResetEncoderTotals(void)
 	Turn_Last_Forward_Count = 0;
 }
 
+static void Car_ResetRouteTiming(void)
+{
+	uint8_t i;
+
+	Route_Active = 0;
+	Route_Done = 0;
+	Route_CurrentSegment = 0;
+	Route_SegmentWaiting = 0;
+	Route_JustStarted = 0;
+	Route_CurrentMs = 0;
+	for (i = 0; i < CAR_ROUTE_SEGMENT_COUNT; i++)
+	{
+		Route_SegmentMs[i] = 0;
+		Route_SegmentClosed[i] = 0;
+	}
+}
+
+static void Car_StartRouteTiming(void)
+{
+	Car_ResetRouteTiming();
+	Route_Active = 1;
+	Route_JustStarted = 1;
+}
+
+static void Car_StopRouteTiming(void)
+{
+	Car_ResetRouteTiming();
+}
+
+static void Car_UpdateRouteTiming(void)
+{
+	if (Route_JustStarted)
+	{
+		Route_JustStarted = 0;
+		return;
+	}
+
+	if (Route_Active && !Route_Done && (Route_CurrentSegment < CAR_ROUTE_SEGMENT_COUNT))
+	{
+		Route_CurrentMs += CAR_LOOP_PERIOD_MS;
+	}
+}
+
+static void Car_CloseRouteSegment(void)
+{
+	if (Route_Done || (Route_CurrentSegment >= CAR_ROUTE_SEGMENT_COUNT) || !Route_Active)
+	{
+		return;
+	}
+
+	Route_SegmentMs[Route_CurrentSegment] = Route_CurrentMs;
+	Route_SegmentClosed[Route_CurrentSegment] = 1;
+	Route_CurrentMs = 0;
+	Route_CurrentSegment++;
+	Route_Active = 0;
+	Route_SegmentWaiting = 1;
+}
+
+static void Car_AdvanceRouteSegment(void)
+{
+	if (!Route_SegmentWaiting || Route_Done)
+	{
+		return;
+	}
+
+	Route_SegmentWaiting = 0;
+	if (Route_CurrentSegment < CAR_ROUTE_SEGMENT_COUNT)
+	{
+		Route_Active = 1;
+		Route_JustStarted = 1;
+	}
+	else
+	{
+		Route_Done = 1;
+		Route_Active = 0;
+		Route_CurrentMs = 0;
+	}
+}
+
 static int16_t Car_CalcLineError(void)
 {
 	int16_t PositionSum;
@@ -212,6 +329,11 @@ static uint8_t Car_IsRightEdgePairTSignal(void)
 	return (Gray_Sensor[GRAY_IDX_R2] && Gray_Sensor[GRAY_IDX_R3]) ? 1 : 0;
 }
 
+static void Car_NextRouteMode(void)
+{
+	Route_SelectedMode = (uint8_t)((Route_SelectedMode + 1u) % CAR_ROUTE_MODE_COUNT);
+}
+
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 {
 	if (Direction == CAR_TURN_LEFT)
@@ -237,6 +359,7 @@ static void Car_StartSharpTurn(uint8_t Direction)
 	Turn_Entry_Right_Total = Encoder_Right_Total;
 	Turn_Forward_Count = 0;
 	Line_Mode = 'A';
+	Car_CloseRouteSegment();
 }
 
 static void Car_FinishSharpTurn(void)
@@ -245,6 +368,7 @@ static void Car_FinishSharpTurn(void)
 	Car_ResetLineController();
 	Turn_Cooldown_Tick = CAR_TURN_COOLDOWN_TICKS;
 	Line_Mode = 'K';
+	Car_AdvanceRouteSegment();
 }
 
 static uint8_t Car_UpdateSharpTurnDetect(void)
@@ -401,23 +525,96 @@ static void OLED_ShowLineStateRToL(uint8_t X, uint8_t Y, uint8_t FontSize)
 	}
 }
 
+static uint32_t Car_GetRouteDisplayMs(uint8_t Index)
+{
+	if (Index >= CAR_ROUTE_SEGMENT_COUNT)
+	{
+		return 0;
+	}
+
+	if (Route_SegmentClosed[Index])
+	{
+		return Route_SegmentMs[Index];
+	}
+	if (Index == Route_CurrentSegment)
+	{
+		return Route_CurrentMs;
+	}
+	return 0;
+}
+
+static void Car_MsToDisplayTime(uint32_t Ms, uint32_t *Sec, uint32_t *Centi)
+{
+	uint32_t TotalCenti;
+
+	TotalCenti = (Ms + 5u) / 10u;
+	*Sec = TotalCenti / 100u;
+	*Centi = TotalCenti % 100u;
+}
+
+static void OLED_ShowTrackPage(void)
+{
+	const CAR_ROUTE_STEP *Step;
+	int32_t AvgEncoderTotal;
+
+	Step = &Car_RouteMap[Route_SelectedMode][(Route_CurrentSegment < CAR_ROUTE_SEGMENT_COUNT) ? Route_CurrentSegment : (CAR_ROUTE_SEGMENT_COUNT - 1u)];
+	AvgEncoderTotal = (Encoder_Left_Total + Encoder_Right_Total) / 2;
+	OLED_Clear();
+	OLED_ShowString(0, 0, "IR:", OLED_8X16);
+	OLED_ShowLineStateRToL(24, 0, OLED_8X16);
+	OLED_Printf(0, 16, OLED_8X16, "AVG:%+5ld", (long)AvgEncoderTotal);
+	OLED_Printf(0, 32, OLED_8X16, "MODE:%s", (char *)Car_RouteModeText[Route_SelectedMode]);
+	if (Route_Done)
+	{
+		OLED_ShowString(0, 48, "SEG:DONE", OLED_8X16);
+	}
+	else
+	{
+		OLED_Printf(0, 48, OLED_8X16, "SEG:%c-%c", Step->From, Step->To);
+	}
+	OLED_Update();
+}
+
+static void OLED_ShowRoutePage(void)
+{
+	uint8_t i;
+	uint8_t ShowCount;
+	uint32_t Ms;
+	uint32_t Sec;
+	uint32_t Centi;
+	const CAR_ROUTE_STEP *Step;
+
+	OLED_Clear();
+	if (Route_Done || (Route_CurrentSegment >= CAR_ROUTE_SEGMENT_COUNT))
+	{
+		ShowCount = CAR_ROUTE_SEGMENT_COUNT;
+	}
+	else
+	{
+		ShowCount = (uint8_t)(Route_CurrentSegment + 1u);
+	}
+
+	for (i = 0; i < ShowCount; i++)
+	{
+		Step = &Car_RouteMap[Route_SelectedMode][i];
+		Ms = Car_GetRouteDisplayMs(i);
+		Car_MsToDisplayTime(Ms, &Sec, &Centi);
+		OLED_Printf(0, (int16_t)(i * 10u), OLED_6X8, "%c-%c:%02lu.%02luS",
+		            Step->From, Step->To, (unsigned long)Sec, (unsigned long)Centi);
+	}
+	OLED_Update();
+}
+
 static void OLED_Task(void)
 {
-	uint16_t DisplayForwardCount;
-
-	DisplayForwardCount = (Turn_Forward_Count != 0) ? Turn_Forward_Count : Turn_Last_Forward_Count;
-	OLED_Clear();
-	OLED_ShowString(0, 0, Car_Running ? "RUN  IR:" : "STOP IR:", OLED_6X8);
-	OLED_ShowLineStateRToL(54, 0, OLED_6X8);
-	OLED_Printf(0, 10, OLED_6X8, "E:%+4d D:%+4d", Line_Error, Line_Derivative);
-	OLED_Printf(0, 20, OLED_6X8, "S:%+3d B:%+3d", Line_Steer_PWM, Encoder_Balance_PWM);
-	OLED_Printf(0, 30, OLED_6X8, "PL:%+3d PR:%+3d", PWM_Left, PWM_Right);
-	/* 第五行：左右轮编码器累计值。这里就是 T 路口“先前进一段”的观测基准。 */
-	OLED_Printf(0, 40, OLED_6X8, "L:%+5ld R:%+5ld",
-	            (long)Encoder_Left_Total, (long)Encoder_Right_Total);
-	OLED_Printf(0, 52, OLED_6X8, "M:%c C:%04d W:%04d",
-	            Line_Mode, DisplayForwardCount, CAR_TURN_ENTRY_FORWARD_COUNT);
-	OLED_Update();
+	if (OLED_Page == CAR_DISPLAY_PAGE_ROUTE)
+	{
+		OLED_ShowRoutePage();
+	}
+	else
+	{
+		OLED_ShowTrackPage();
+	}
 }
 
 static void Key_Task(void)
@@ -433,11 +630,21 @@ static void Key_Task(void)
 		if (Car_Running)
 		{
 			Car_ResetEncoderTotals();
+			Car_StartRouteTiming();
 		}
 		if (!Car_Running)
 		{
 			Car_Stop();
+			Car_StopRouteTiming();
 		}
+	}
+	else if (KeyNum == KEY_NUM_K2)
+	{
+		OLED_Page ^= 1u;
+	}
+	else if ((KeyNum == KEY_NUM_K3) && !Car_Running)
+	{
+		Car_NextRouteMode();
 	}
 }
 
@@ -476,6 +683,8 @@ int main(void)
 			Grayscale_Tick();
 			Line_Error = Car_CalcLineError();
 		}
+
+		Car_UpdateRouteTiming();
 
 		if (++DisplayLoopCount >= 5)
 		{
