@@ -7,8 +7,8 @@
 #include "Grayscale.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               30.0f
-#define CAR_LINE_KP                0.105f
+#define CAR_BASE_PWM               25.0f
+#define CAR_LINE_KP                0.092f
 #define CAR_LINE_KD                0.180f
 #define CAR_ENCODER_BALANCE_KP     0.350f
 #define CAR_STEER_LIMIT            26.0f
@@ -16,30 +16,35 @@
 #define CAR_MIN_FORWARD_PWM        10.0f
 #define CAR_PWM_LIMIT              70.0f
 
-/* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 20ms，数值越大越不容易误触发。 */
+/* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 10ms，数值越大越不容易误触发。 */
 #define CAR_SHARP_CONFIRM_TICKS    1
 /* 可调窗口：T 路口判定时，M+左侧三路或 M+右侧三路中至少几个高电平才触发。 */
 #define CAR_SHARP_GROUP_ACTIVE_MIN 3
 /* 可调窗口：边缘双探头 T 路口兜底开关。1=最左两路或最右两路同时高电平也触发前进转弯。 */
 #define CAR_EDGE_PAIR_T_ENABLE     1
 /* 可调窗口：检测到 T 路口后先前进的编码器累计值，单位和 OLED 第五行 L/R 显示一致。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 120
+#define CAR_TURN_ENTRY_FORWARD_COUNT 160
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
 #define CAR_TURN_ENTRY_COUNT_WINDOW  8
-/* 可调窗口：编码器异常时最大前探周期数，每个周期约 20ms，防止一直前进。 */
+/* 可调窗口：编码器异常时最大前探周期数，每个周期约 10ms，防止一直前进。 */
 #define CAR_TURN_ENTRY_MAX_TICKS     20
 /* 可调窗口：T 弯方向映射。若实车转弯方向相反，只改这两个宏即可。 */
 #define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
 #define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           30
-/* 可调窗口：固定转弯持续周期数，每个周期约 20ms，数值越大转弯幅度越大。 */
-#define CAR_FIXED_TURN_TICKS         20
-/* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，屏蔽期内不再次触发 90 度转弯。 */
+/* 可调窗口：固定转弯持续周期数，每个周期约 10ms，数值越大转弯幅度越大。 */
+#define CAR_FIXED_TURN_TICKS         19
+/* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，每个周期约 10ms，屏蔽期内不再次触发 90 度转弯。 */
 #define CAR_TURN_COOLDOWN_TICKS      24
 
 /* 主循环固定时间片：约 10ms。当前仅做循迹、路口和计时逻辑。 */
 #define CAR_LOOP_PERIOD_MS           10
+
+/* 可调窗口：A-D/D-A 路段包含 4 个中间 T 和第 5 个目标 T。 */
+#define CAR_ROUTE_AD_T_COUNT         5
+/* 可调窗口：其他普通路段到达目标点需要经过的 T 数量。 */
+#define CAR_ROUTE_NORMAL_T_COUNT     1
 
 #define CAR_LINE_STATE_FOLLOW      0
 #define CAR_LINE_STATE_APPROACH    1
@@ -110,6 +115,8 @@ static uint8_t Route_Done = 0;
 static uint8_t Route_CurrentSegment = 0;
 static uint8_t Route_SegmentWaiting = 0;
 static uint8_t Route_JustStarted = 0;
+static uint8_t Route_SegmentTurnCount = 0;
+static uint8_t Route_TurnEndsSegment = 0;
 static uint32_t Route_CurrentMs = 0;
 static uint32_t Route_SegmentMs[CAR_ROUTE_SEGMENT_COUNT] = {0};
 static uint8_t Route_SegmentClosed[CAR_ROUTE_SEGMENT_COUNT] = {0};
@@ -209,12 +216,34 @@ static void Car_ResetRouteTiming(void)
 	Route_CurrentSegment = 0;
 	Route_SegmentWaiting = 0;
 	Route_JustStarted = 0;
+	Route_SegmentTurnCount = 0;
+	Route_TurnEndsSegment = 0;
 	Route_CurrentMs = 0;
 	for (i = 0; i < CAR_ROUTE_SEGMENT_COUNT; i++)
 	{
 		Route_SegmentMs[i] = 0;
 		Route_SegmentClosed[i] = 0;
 	}
+}
+
+static uint8_t Car_GetRouteTurnTarget(void)
+{
+	const CAR_ROUTE_STEP *Step;
+
+	if ((Route_SelectedMode >= CAR_ROUTE_MODE_COUNT)
+	 || (Route_CurrentSegment >= CAR_ROUTE_SEGMENT_COUNT))
+	{
+		return CAR_ROUTE_NORMAL_T_COUNT;
+	}
+
+	Step = &Car_RouteMap[Route_SelectedMode][Route_CurrentSegment];
+	if (((Step->From == 'A') && (Step->To == 'D'))
+	 || ((Step->From == 'D') && (Step->To == 'A')))
+	{
+		return CAR_ROUTE_AD_T_COUNT;
+	}
+
+	return CAR_ROUTE_NORMAL_T_COUNT;
 }
 
 static void Car_StartRouteTiming(void)
@@ -266,6 +295,7 @@ static void Car_AdvanceRouteSegment(void)
 	}
 
 	Route_SegmentWaiting = 0;
+	Route_SegmentTurnCount = 0;
 	if (Route_CurrentSegment < CAR_ROUTE_SEGMENT_COUNT)
 	{
 		Route_Active = 1;
@@ -348,6 +378,8 @@ static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 
 static void Car_StartSharpTurn(uint8_t Direction)
 {
+	uint8_t TargetTurnCount;
+
 	Car_ClearLinePD();
 	Line_State = CAR_LINE_STATE_APPROACH;
 	Turn_Direction = Direction;
@@ -359,7 +391,25 @@ static void Car_StartSharpTurn(uint8_t Direction)
 	Turn_Entry_Right_Total = Encoder_Right_Total;
 	Turn_Forward_Count = 0;
 	Line_Mode = 'A';
-	Car_CloseRouteSegment();
+
+	/*
+	 * 每个 T 路口都执行完整的前进和转弯动作。
+	 * 只有当前路段累计达到目标 T 数量时，才在固定动作结束后关闭本段计时。
+	 */
+	Route_TurnEndsSegment = 0;
+	if (Route_Active && !Route_Done
+		&& (Route_CurrentSegment < CAR_ROUTE_SEGMENT_COUNT))
+	{
+		if (Route_SegmentTurnCount < 255)
+		{
+			Route_SegmentTurnCount++;
+		}
+		TargetTurnCount = Car_GetRouteTurnTarget();
+		if (Route_SegmentTurnCount >= TargetTurnCount)
+		{
+			Route_TurnEndsSegment = 1;
+		}
+	}
 }
 
 static void Car_FinishSharpTurn(void)
@@ -368,7 +418,17 @@ static void Car_FinishSharpTurn(void)
 	Car_ResetLineController();
 	Turn_Cooldown_Tick = CAR_TURN_COOLDOWN_TICKS;
 	Line_Mode = 'K';
-	Car_AdvanceRouteSegment();
+
+	/*
+	 * 当前 T 的固定动作结束后，才结束目标路段计时。
+	 * A-D/D-A 的前 4 个中间 T 不会切换路段，计时会继续累加。
+	 */
+	if (Route_TurnEndsSegment)
+	{
+		Route_TurnEndsSegment = 0;
+		Car_CloseRouteSegment();
+		Car_AdvanceRouteSegment();
+	}
 }
 
 static uint8_t Car_UpdateSharpTurnDetect(void)
@@ -667,7 +727,7 @@ int main(void)
 
 	while (1)
 	{
-		/* 固定 20ms 时间片；超声波已停用，循迹状态机每个循环都运行 */
+		/* 固定 10ms 名义时间片；超声波已停用，循迹状态机每个循环都运行 */
 		Delay_ms(CAR_LOOP_PERIOD_MS);
 
 		Car_UpdateEncoders();
