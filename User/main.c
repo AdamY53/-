@@ -33,8 +33,16 @@
 #define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           30
-/* 可调窗口：固定转弯持续周期数，每个周期约 10ms，数值越大转弯幅度越大。 */
-#define CAR_FIXED_TURN_TICKS         19
+/* 可调窗口：左转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
+#define CAR_LEFT_TURN_LEFT_TARGET    (-550)
+/* 可调窗口：左转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
+#define CAR_LEFT_TURN_RIGHT_TARGET   820
+/* 可调窗口：右转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
+#define CAR_RIGHT_TURN_LEFT_TARGET   550
+/* 可调窗口：右转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
+#define CAR_RIGHT_TURN_RIGHT_TARGET  (-820)
+/* 可调窗口：编码器未达到目标时的最大固定转弯周期数，每个周期约10ms。 */
+#define CAR_FIXED_TURN_MAX_TICKS     300
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，每个周期约 10ms，屏蔽期内不再次触发 90 度转弯。 */
 #define CAR_TURN_COOLDOWN_TICKS      24
 
@@ -99,12 +107,18 @@ static int8_t PWM_Left = 0;
 
 static uint8_t Line_State = CAR_LINE_STATE_FOLLOW;
 static uint8_t Turn_Direction = CAR_TURN_NONE;
-static uint8_t Turn_Tick = 0;
+static uint16_t Turn_Tick = 0;
 static uint8_t Turn_Cooldown_Tick = 0;
 static int32_t Turn_Entry_Left_Total = 0;
 static int32_t Turn_Entry_Right_Total = 0;
 static uint16_t Turn_Forward_Count = 0;
 static uint16_t Turn_Last_Forward_Count = 0;
+static int32_t Turn_Left_Encoder_Count = 0;
+static int32_t Turn_Right_Encoder_Count = 0;
+static int32_t Turn_Left_Encoder_Target = 0;
+static int32_t Turn_Right_Encoder_Target = 0;
+static uint8_t Turn_Left_Encoder_Reached = 0;
+static uint8_t Turn_Right_Encoder_Reached = 0;
 static uint8_t Sharp_Left_Count = 0;
 static uint8_t Sharp_Right_Count = 0;
 static char Line_Mode = 'F';
@@ -184,6 +198,12 @@ static void Car_ResetLineController(void)
 	Turn_Entry_Left_Total = 0;
 	Turn_Entry_Right_Total = 0;
 	Turn_Forward_Count = 0;
+	Turn_Left_Encoder_Count = 0;
+	Turn_Right_Encoder_Count = 0;
+	Turn_Left_Encoder_Target = 0;
+	Turn_Right_Encoder_Target = 0;
+	Turn_Left_Encoder_Reached = 0;
+	Turn_Right_Encoder_Reached = 0;
 	Sharp_Left_Count = 0;
 	Sharp_Right_Count = 0;
 	Line_Mode = 'F';
@@ -364,16 +384,47 @@ static void Car_NextRouteMode(void)
 	Route_SelectedMode = (uint8_t)((Route_SelectedMode + 1u) % CAR_ROUTE_MODE_COUNT);
 }
 
+static uint8_t Car_IsTurnEncoderTargetReached(int32_t Current, int32_t Target)
+{
+	if (Target >= 0)
+	{
+		return (Current >= Target) ? 1 : 0;
+	}
+	return (Current <= Target) ? 1 : 0;
+}
+
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 {
+	int16_t LeftPWM;
+	int16_t RightPWM;
+
 	if (Direction == CAR_TURN_LEFT)
 	{
-		Car_SetSignedPWM(-(int16_t)Speed, Speed);
+		LeftPWM = -(int16_t)Speed;
+		RightPWM = Speed;
 	}
 	else if (Direction == CAR_TURN_RIGHT)
 	{
-		Car_SetSignedPWM(Speed, -(int16_t)Speed);
+		LeftPWM = Speed;
+		RightPWM = -(int16_t)Speed;
 	}
+	else
+	{
+		LeftPWM = 0;
+		RightPWM = 0;
+	}
+
+	/* 某个轮子先达到目标后，单独停止该轮，另一轮继续完成剩余角度。 */
+	if (Turn_Left_Encoder_Reached)
+	{
+		LeftPWM = 0;
+	}
+	if (Turn_Right_Encoder_Reached)
+	{
+		RightPWM = 0;
+	}
+
+	Car_SetSignedPWM(LeftPWM, RightPWM);
 }
 
 static void Car_StartSharpTurn(uint8_t Direction)
@@ -390,6 +441,20 @@ static void Car_StartSharpTurn(uint8_t Direction)
 	Turn_Entry_Left_Total = Encoder_Left_Total;
 	Turn_Entry_Right_Total = Encoder_Right_Total;
 	Turn_Forward_Count = 0;
+	Turn_Left_Encoder_Count = 0;
+	Turn_Right_Encoder_Count = 0;
+	Turn_Left_Encoder_Reached = 0;
+	Turn_Right_Encoder_Reached = 0;
+	if (Direction == CAR_TURN_LEFT)
+	{
+		Turn_Left_Encoder_Target = CAR_LEFT_TURN_LEFT_TARGET;
+		Turn_Right_Encoder_Target = CAR_LEFT_TURN_RIGHT_TARGET;
+	}
+	else
+	{
+		Turn_Left_Encoder_Target = CAR_RIGHT_TURN_LEFT_TARGET;
+		Turn_Right_Encoder_Target = CAR_RIGHT_TURN_RIGHT_TARGET;
+	}
 	Line_Mode = 'A';
 
 	/*
@@ -509,17 +574,50 @@ static void Car_RunSharpTurn(void)
 		 || (Turn_Tick >= CAR_TURN_ENTRY_MAX_TICKS))
 		{
 			Turn_Tick = 0;
+			/*
+			 * 前进阶段结束后重新记录起点，
+			 * 90度目标只统计固定转弯阶段的左右轮计数。
+			 */
+			Turn_Entry_Left_Total = Encoder_Left_Total;
+			Turn_Entry_Right_Total = Encoder_Right_Total;
+			Turn_Left_Encoder_Count = 0;
+			Turn_Right_Encoder_Count = 0;
+			Turn_Left_Encoder_Reached = Car_IsTurnEncoderTargetReached(
+				0, Turn_Left_Encoder_Target);
+			Turn_Right_Encoder_Reached = Car_IsTurnEncoderTargetReached(
+				0, Turn_Right_Encoder_Target);
 			Line_State = CAR_LINE_STATE_FIXED_TURN;
+			/* 同一循环立即切换到反向差速，避免多跑一个10ms直行周期。 */
+			Car_SetTurnPWM(Turn_Direction, CAR_FIXED_TURN_PWM);
 		}
 		return;
 	}
 
 	Line_Mode = (Turn_Direction == CAR_TURN_LEFT) ? 'L' : 'R';
-	Car_SetTurnPWM(Turn_Direction, CAR_FIXED_TURN_PWM);
-	if (Turn_Tick >= CAR_FIXED_TURN_TICKS)
+	Turn_Left_Encoder_Count = Encoder_Left_Total - Turn_Entry_Left_Total;
+	Turn_Right_Encoder_Count = Encoder_Right_Total - Turn_Entry_Right_Total;
+	Turn_Left_Encoder_Reached = Car_IsTurnEncoderTargetReached(
+		Turn_Left_Encoder_Count, Turn_Left_Encoder_Target);
+	Turn_Right_Encoder_Reached = Car_IsTurnEncoderTargetReached(
+		Turn_Right_Encoder_Count, Turn_Right_Encoder_Target);
+
+	if (Turn_Left_Encoder_Reached && Turn_Right_Encoder_Reached)
 	{
+		/* 两轮都达到目标后立即清零PWM，避免下一循环继续保持反向差速。 */
+		Car_Stop();
 		Car_FinishSharpTurn();
+		return;
 	}
+
+	if (Turn_Tick >= CAR_FIXED_TURN_MAX_TICKS)
+	{
+		/* 编码器异常或机械卡住时，用最大周期作为保护性结束条件。 */
+		Car_Stop();
+		Car_FinishSharpTurn();
+		return;
+	}
+
+	Car_SetTurnPWM(Turn_Direction, CAR_FIXED_TURN_PWM);
 }
 
 static void Car_LineFollowStraight(void)
