@@ -44,7 +44,11 @@
 #define TEST_STATE_DONE              4
 #define TEST_STATE_TIMEOUT           5
 
+#define TEST_DISPLAY_PAGE_TOTAL      0
+#define TEST_DISPLAY_PAGE_TURN       1
+
 static uint8_t Test_State = TEST_STATE_IDLE;
+static uint8_t Test_DisplayPage = TEST_DISPLAY_PAGE_TOTAL;
 static uint32_t Test_StateMs = 0;
 static uint32_t Test_TurnMs = 0;
 static int16_t Test_EncoderLeftDelta = 0;
@@ -253,13 +257,29 @@ static char *Test_GetStateText(void)
 static void Test_ShowOLED(void)
 {
 	OLED_Clear();
-	OLED_Printf(0, 0, OLED_8X16, "L90:%+06ld",
-	            (long)Test_TurnLeftTotal);
-	OLED_Printf(0, 16, OLED_8X16, "R90:%+06ld",
-	            (long)Test_TurnRightTotal);
-	OLED_Printf(0, 32, OLED_8X16, "T:%+06ld,%+06ld",
-	            (long)TEST_TURN_LEFT_TARGET, (long)TEST_TURN_RIGHT_TARGET);
-	OLED_Printf(0, 48, OLED_8X16, "S:%s", Test_GetStateText());
+	if (Test_DisplayPage == TEST_DISPLAY_PAGE_TOTAL)
+	{
+		/*
+		 * LALL/RALL就是原工程OLED第五行LR的累计计数，
+		 * 这里不再取左右平均值，分别显示左右轮。
+		 */
+		OLED_Printf(0, 0, OLED_8X16, "LALL:%+06ld",
+		            (long)Test_LeftTotal);
+		OLED_Printf(0, 16, OLED_8X16, "RALL:%+06ld",
+		            (long)Test_RightTotal);
+		OLED_Printf(0, 32, OLED_8X16, "S:%s", Test_GetStateText());
+		OLED_ShowString(0, 48, "K1 START K2 PAGE", OLED_8X16);
+	}
+	else
+	{
+		OLED_Printf(0, 0, OLED_8X16, "L90 :%+06ld",
+		            (long)Test_TurnLeftTotal);
+		OLED_Printf(0, 16, OLED_8X16, "R90 :%+06ld",
+		            (long)Test_TurnRightTotal);
+		OLED_Printf(0, 32, OLED_8X16, "T:%+06ld,%+06ld",
+		            (long)TEST_TURN_LEFT_TARGET, (long)TEST_TURN_RIGHT_TARGET);
+		OLED_Printf(0, 48, OLED_8X16, "S:%s", Test_GetStateText());
+	}
 	OLED_Update();
 }
 
@@ -269,7 +289,11 @@ static void Test_KeyTask(void)
 
 	Key_Tick();
 	KeyNum = Key_GetNum();
-	if (KeyNum == KEY_NUM_K1)
+	if (KeyNum == KEY_NUM_K2)
+	{
+		Test_DisplayPage ^= 1u;
+	}
+	else if (KeyNum == KEY_NUM_K1)
 	{
 		if (Test_State == TEST_STATE_IDLE
 		 || Test_State == TEST_STATE_DONE
