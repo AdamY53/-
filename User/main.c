@@ -23,7 +23,7 @@
 /* 可调窗口：边缘双探头 T 路口兜底开关。1=最左两路或最右两路同时高电平也触发前进转弯。 */
 #define CAR_EDGE_PAIR_T_ENABLE     1
 /* 可调窗口：检测到 T 路口后先前进的编码器累计值，单位和 OLED 第五行 L/R 显示一致。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 160
+#define CAR_TURN_ENTRY_FORWARD_COUNT 300
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
 #define CAR_TURN_ENTRY_COUNT_WINDOW  8
 /* 可调窗口：编码器异常时最大前探周期数，每个周期约 10ms，防止一直前进。 */
@@ -34,13 +34,13 @@
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           30
 /* 可调窗口：左转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_LEFT_TURN_LEFT_TARGET    (-550)
+#define CAR_LEFT_TURN_LEFT_TARGET    (-450)
 /* 可调窗口：左转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_LEFT_TURN_RIGHT_TARGET   820
+#define CAR_LEFT_TURN_RIGHT_TARGET   730
 /* 可调窗口：右转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_RIGHT_TURN_LEFT_TARGET   550
+#define CAR_RIGHT_TURN_LEFT_TARGET   450
 /* 可调窗口：右转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_RIGHT_TURN_RIGHT_TARGET  (-820)
+#define CAR_RIGHT_TURN_RIGHT_TARGET  (-730)
 /* 可调窗口：编码器未达到目标时的最大固定转弯周期数，每个周期约10ms。 */
 #define CAR_FIXED_TURN_MAX_TICKS     300
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，每个周期约 10ms，屏蔽期内不再次触发 90 度转弯。 */
@@ -53,6 +53,14 @@
 #define CAR_ROUTE_AD_T_COUNT         5
 /* 可调窗口：其他普通路段到达目标点需要经过的 T 数量。 */
 #define CAR_ROUTE_NORMAL_T_COUNT     1
+/* 可调窗口：模式B中，第一个特殊 T 后直行到 Q 点附近的编码器平均累计值，单位和 OLED 的 AVG 一样。 */
+#define CAR_MODE_B_Q_FORWARD_COUNT   2130
+/* 可调窗口：模式B中到 Q/O 点后的停稳时间，每个周期约 10ms，50=约0.5秒。 */
+#define CAR_MODE_B_STOP_TICKS        50
+/* 可调窗口：模式B中，无黑线直行后看到多少路灰度为高电平才认为重新遇到黑线。 */
+#define CAR_MODE_B_LINE_ACTIVE_MIN   5
+/* 可调窗口：模式B重新回到黑线后，后面第几个 T 路口才算 A-D/D-A 路段结束。 */
+#define CAR_MODE_B_REJOIN_T_COUNT    3
 
 #define CAR_LINE_STATE_FOLLOW      0
 #define CAR_LINE_STATE_APPROACH    1
@@ -64,6 +72,18 @@
 
 #define CAR_DISPLAY_PAGE_TRACK      0
 #define CAR_DISPLAY_PAGE_ROUTE      1
+
+#define CAR_WORK_MODE_A             0
+#define CAR_WORK_MODE_B             1
+
+#define CAR_MODE_B_STATE_IDLE            0
+#define CAR_MODE_B_STATE_FORWARD_TO_Q    1
+#define CAR_MODE_B_STATE_STOP_Q          2
+#define CAR_MODE_B_STATE_TURN_TO_O       3
+#define CAR_MODE_B_STATE_FORWARD_TO_LINE 4
+#define CAR_MODE_B_STATE_STOP_O          5
+#define CAR_MODE_B_STATE_REJOIN_TURN     6
+#define CAR_MODE_B_STATE_AFTER_REJOIN    7
 
 #define CAR_ROUTE_MODE_COUNT        8
 #define CAR_ROUTE_SEGMENT_COUNT     4
@@ -134,6 +154,14 @@ static uint8_t Route_TurnEndsSegment = 0;
 static uint32_t Route_CurrentMs = 0;
 static uint32_t Route_SegmentMs[CAR_ROUTE_SEGMENT_COUNT] = {0};
 static uint8_t Route_SegmentClosed[CAR_ROUTE_SEGMENT_COUNT] = {0};
+static uint8_t Work_Mode = CAR_WORK_MODE_A;
+static uint8_t ModeB_State = CAR_MODE_B_STATE_IDLE;
+static uint16_t ModeB_Stop_Tick = 0;
+static int32_t ModeB_Straight_Left_Total = 0;
+static int32_t ModeB_Straight_Right_Total = 0;
+static uint16_t ModeB_Straight_Count = 0;
+
+static void Car_RunSharpTurn(void);
 
 static float LimitFloat(float Value, float Min, float Max)
 {
@@ -227,6 +255,15 @@ static void Car_ResetEncoderTotals(void)
 	Turn_Last_Forward_Count = 0;
 }
 
+static void Car_ResetModeBNav(void)
+{
+	ModeB_State = CAR_MODE_B_STATE_IDLE;
+	ModeB_Stop_Tick = 0;
+	ModeB_Straight_Left_Total = 0;
+	ModeB_Straight_Right_Total = 0;
+	ModeB_Straight_Count = 0;
+}
+
 static void Car_ResetRouteTiming(void)
 {
 	uint8_t i;
@@ -244,6 +281,7 @@ static void Car_ResetRouteTiming(void)
 		Route_SegmentMs[i] = 0;
 		Route_SegmentClosed[i] = 0;
 	}
+	Car_ResetModeBNav();
 }
 
 static uint8_t Car_GetRouteTurnTarget(void)
@@ -260,10 +298,39 @@ static uint8_t Car_GetRouteTurnTarget(void)
 	if (((Step->From == 'A') && (Step->To == 'D'))
 	 || ((Step->From == 'D') && (Step->To == 'A')))
 	{
+		if ((Work_Mode == CAR_WORK_MODE_B)
+		 && (ModeB_State == CAR_MODE_B_STATE_AFTER_REJOIN))
+		{
+			return CAR_MODE_B_REJOIN_T_COUNT;
+		}
 		return CAR_ROUTE_AD_T_COUNT;
 	}
 
 	return CAR_ROUTE_NORMAL_T_COUNT;
+}
+
+static uint8_t Car_IsADRouteStep(const CAR_ROUTE_STEP *Step)
+{
+	if (((Step->From == 'A') && (Step->To == 'D'))
+	 || ((Step->From == 'D') && (Step->To == 'A')))
+	{
+		return 1;
+	}
+	return 0;
+}
+
+static uint8_t Car_IsCurrentModeBSpecialSegment(void)
+{
+	if ((Work_Mode != CAR_WORK_MODE_B)
+	 || !Route_Active
+	 || Route_Done
+	 || (Route_SelectedMode >= CAR_ROUTE_MODE_COUNT)
+	 || (Route_CurrentSegment >= CAR_ROUTE_SEGMENT_COUNT))
+	{
+		return 0;
+	}
+
+	return Car_IsADRouteStep(&Car_RouteMap[Route_SelectedMode][Route_CurrentSegment]);
 }
 
 static void Car_StartRouteTiming(void)
@@ -316,6 +383,7 @@ static void Car_AdvanceRouteSegment(void)
 
 	Route_SegmentWaiting = 0;
 	Route_SegmentTurnCount = 0;
+	Car_ResetModeBNav();
 	if (Route_CurrentSegment < CAR_ROUTE_SEGMENT_COUNT)
 	{
 		Route_Active = 1;
@@ -382,6 +450,20 @@ static uint8_t Car_IsRightEdgePairTSignal(void)
 static void Car_NextRouteMode(void)
 {
 	Route_SelectedMode = (uint8_t)((Route_SelectedMode + 1u) % CAR_ROUTE_MODE_COUNT);
+	Car_ResetModeBNav();
+}
+
+static void Car_ToggleWorkMode(void)
+{
+	if (Work_Mode == CAR_WORK_MODE_A)
+	{
+		Work_Mode = CAR_WORK_MODE_B;
+	}
+	else
+	{
+		Work_Mode = CAR_WORK_MODE_A;
+	}
+	Car_ResetModeBNav();
 }
 
 static uint8_t Car_IsTurnEncoderTargetReached(int32_t Current, int32_t Target)
@@ -391,6 +473,20 @@ static uint8_t Car_IsTurnEncoderTargetReached(int32_t Current, int32_t Target)
 		return (Current >= Target) ? 1 : 0;
 	}
 	return (Current <= Target) ? 1 : 0;
+}
+
+static void Car_LoadTurnEncoderTargets(uint8_t Direction)
+{
+	if (Direction == CAR_TURN_LEFT)
+	{
+		Turn_Left_Encoder_Target = CAR_LEFT_TURN_LEFT_TARGET;
+		Turn_Right_Encoder_Target = CAR_LEFT_TURN_RIGHT_TARGET;
+	}
+	else
+	{
+		Turn_Left_Encoder_Target = CAR_RIGHT_TURN_LEFT_TARGET;
+		Turn_Right_Encoder_Target = CAR_RIGHT_TURN_RIGHT_TARGET;
+	}
 }
 
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
@@ -427,7 +523,7 @@ static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 	Car_SetSignedPWM(LeftPWM, RightPWM);
 }
 
-static void Car_StartSharpTurn(uint8_t Direction)
+static void Car_StartSharpTurnEx(uint8_t Direction, uint8_t CountRouteTurn)
 {
 	uint8_t TargetTurnCount;
 
@@ -445,16 +541,7 @@ static void Car_StartSharpTurn(uint8_t Direction)
 	Turn_Right_Encoder_Count = 0;
 	Turn_Left_Encoder_Reached = 0;
 	Turn_Right_Encoder_Reached = 0;
-	if (Direction == CAR_TURN_LEFT)
-	{
-		Turn_Left_Encoder_Target = CAR_LEFT_TURN_LEFT_TARGET;
-		Turn_Right_Encoder_Target = CAR_LEFT_TURN_RIGHT_TARGET;
-	}
-	else
-	{
-		Turn_Left_Encoder_Target = CAR_RIGHT_TURN_LEFT_TARGET;
-		Turn_Right_Encoder_Target = CAR_RIGHT_TURN_RIGHT_TARGET;
-	}
+	Car_LoadTurnEncoderTargets(Direction);
 	Line_Mode = 'A';
 
 	/*
@@ -462,7 +549,8 @@ static void Car_StartSharpTurn(uint8_t Direction)
 	 * 只有当前路段累计达到目标 T 数量时，才在固定动作结束后关闭本段计时。
 	 */
 	Route_TurnEndsSegment = 0;
-	if (Route_Active && !Route_Done
+	if (CountRouteTurn
+		&& Route_Active && !Route_Done
 		&& (Route_CurrentSegment < CAR_ROUTE_SEGMENT_COUNT))
 	{
 		if (Route_SegmentTurnCount < 255)
@@ -477,12 +565,294 @@ static void Car_StartSharpTurn(uint8_t Direction)
 	}
 }
 
+static void Car_StartSharpTurn(uint8_t Direction)
+{
+	Car_StartSharpTurnEx(Direction, 1);
+}
+
+static uint8_t Car_GetModeBQTurnDirection(void)
+{
+	const CAR_ROUTE_STEP *Step;
+
+	Step = &Car_RouteMap[Route_SelectedMode][Route_CurrentSegment];
+	if ((Step->From == 'A') && (Step->To == 'D'))
+	{
+		/* A-D 方向：到 Q 点附近后向右 90 度转向。 */
+		return CAR_TURN_RIGHT;
+	}
+
+	/* D-A 方向：到 Q 点附近后向左 90 度转向。 */
+	return CAR_TURN_LEFT;
+}
+
+static uint8_t Car_GetModeBRejoinTurnDirection(void)
+{
+	const CAR_ROUTE_STEP *Step;
+
+	Step = &Car_RouteMap[Route_SelectedMode][Route_CurrentSegment];
+	if ((Step->From == 'A') && (Step->To == 'D'))
+	{
+		/* A-D 方向：重新识别黑线后向左转，回到正常巡线。 */
+		return CAR_TURN_LEFT;
+	}
+
+	/* D-A 方向：重新识别黑线后向右转，回到正常巡线。 */
+	return CAR_TURN_RIGHT;
+}
+
+static void Car_ModeBStartStraight(void)
+{
+	Car_ClearLinePD();
+	ModeB_Straight_Left_Total = Encoder_Left_Total;
+	ModeB_Straight_Right_Total = Encoder_Right_Total;
+	ModeB_Straight_Count = 0;
+	Sharp_Left_Count = 0;
+	Sharp_Right_Count = 0;
+	Line_State = CAR_LINE_STATE_FOLLOW;
+}
+
+static uint8_t Car_ModeBRunEncoderStraight(uint8_t HasTarget, uint16_t TargetCount)
+{
+	int32_t ForwardDelta;
+	int16_t SpeedDiff;
+	float Balance;
+	float LeftPWM;
+	float RightPWM;
+
+	/* 无黑线直行时，不看灰度偏差，只用左右编码器速度差做修正。 */
+	ForwardDelta = ((Encoder_Left_Total - ModeB_Straight_Left_Total)
+	              + (Encoder_Right_Total - ModeB_Straight_Right_Total)) / 2;
+	if (ForwardDelta < 0)
+	{
+		ForwardDelta = 0;
+	}
+	if (ForwardDelta > 65535)
+	{
+		ForwardDelta = 65535;
+	}
+	ModeB_Straight_Count = (uint16_t)ForwardDelta;
+
+	SpeedDiff = Encoder_Left - Encoder_Right;
+	Balance = (float)SpeedDiff * CAR_ENCODER_BALANCE_KP;
+	Balance = LimitFloat(Balance, -CAR_BALANCE_LIMIT, CAR_BALANCE_LIMIT);
+	Encoder_Balance_PWM = (int8_t)Balance;
+	Line_Steer_PWM = 0;
+	LeftPWM = CAR_BASE_PWM - Balance;
+	RightPWM = CAR_BASE_PWM + Balance;
+	Car_SetForwardPWM(LeftPWM, RightPWM);
+
+	if (HasTarget
+	 && ((ModeB_Straight_Count + CAR_TURN_ENTRY_COUNT_WINDOW) >= TargetCount))
+	{
+		return 1;
+	}
+	return 0;
+}
+
+static void Car_ModeBStartEncoderTurn(uint8_t Direction)
+{
+	Car_ClearLinePD();
+	Line_State = CAR_LINE_STATE_FIXED_TURN;
+	Turn_Direction = Direction;
+	Turn_Tick = 0;
+	Turn_Cooldown_Tick = 0;
+	Route_TurnEndsSegment = 0;
+	Turn_Entry_Left_Total = Encoder_Left_Total;
+	Turn_Entry_Right_Total = Encoder_Right_Total;
+	Turn_Forward_Count = 0;
+	Turn_Left_Encoder_Count = 0;
+	Turn_Right_Encoder_Count = 0;
+	Car_LoadTurnEncoderTargets(Direction);
+	Turn_Left_Encoder_Reached = Car_IsTurnEncoderTargetReached(0, Turn_Left_Encoder_Target);
+	Turn_Right_Encoder_Reached = Car_IsTurnEncoderTargetReached(0, Turn_Right_Encoder_Target);
+	Line_Mode = (Direction == CAR_TURN_LEFT) ? 'L' : 'R';
+	Car_SetTurnPWM(Direction, CAR_FIXED_TURN_PWM);
+}
+
+static void Car_ModeBStartForwardToQ(void)
+{
+	/* 第一个特殊 T 只作为“进入 Q/O 导航”的触发点，不执行普通前进转弯。 */
+	ModeB_State = CAR_MODE_B_STATE_FORWARD_TO_Q;
+	Line_Mode = 'Q';
+	Car_ModeBStartStraight();
+}
+
+static void Car_ModeBStartRejoinTurn(void)
+{
+	ModeB_State = CAR_MODE_B_STATE_REJOIN_TURN;
+	/* 重新识别黑线后的这次固定动作不计入 A-D/D-A 的后续 3 个 T。 */
+	Car_StartSharpTurnEx(Car_GetModeBRejoinTurnDirection(), 0);
+}
+
+static uint8_t Car_IsModeBNavBusy(void)
+{
+	if ((Work_Mode == CAR_WORK_MODE_B)
+	 && (ModeB_State != CAR_MODE_B_STATE_IDLE)
+	 && (ModeB_State != CAR_MODE_B_STATE_AFTER_REJOIN))
+	{
+		return 1;
+	}
+	return 0;
+}
+
+static uint8_t Car_GetSharpTurnCandidate(uint8_t *Direction)
+{
+	uint8_t LeftTCount;
+	uint8_t RightTCount;
+	uint8_t LeftT;
+	uint8_t RightT;
+
+	/* 悬空保护：有效灰度数少于 2 时，不认为遇到路口。 */
+	if (Gray_ActiveCount < 2)
+	{
+		*Direction = CAR_TURN_NONE;
+		return 0;
+	}
+
+	LeftTCount = Car_CountLeftTurnSensors();
+	RightTCount = Car_CountRightTurnSensors();
+	LeftT = (LeftTCount >= CAR_SHARP_GROUP_ACTIVE_MIN)
+	     || (CAR_EDGE_PAIR_T_ENABLE && Car_IsLeftEdgePairTSignal());
+	RightT = (RightTCount >= CAR_SHARP_GROUP_ACTIVE_MIN)
+	      || (CAR_EDGE_PAIR_T_ENABLE && Car_IsRightEdgePairTSignal());
+
+	if (LeftT && !RightT)
+	{
+		*Direction = CAR_TURN_LEFT;
+		return 1;
+	}
+	if (RightT && !LeftT)
+	{
+		*Direction = CAR_TURN_RIGHT;
+		return 1;
+	}
+	if (LeftT || RightT)
+	{
+		/* 左右都像 T 时，模式B可把它当“第一个特殊T”的触发点；
+		 * 普通模式仍不直接转弯，避免方向不明确。 */
+		*Direction = CAR_TURN_NONE;
+		return 1;
+	}
+
+	*Direction = CAR_TURN_NONE;
+	return 0;
+}
+
+static uint8_t Car_UpdateModeBFirstTDetect(void)
+{
+	uint8_t Direction;
+
+	if (!Car_IsCurrentModeBSpecialSegment()
+	 || (ModeB_State != CAR_MODE_B_STATE_IDLE))
+	{
+		return 0;
+	}
+
+	if (Car_GetSharpTurnCandidate(&Direction))
+	{
+		Sharp_Left_Count++;
+		Sharp_Right_Count = 0;
+		if (Sharp_Left_Count >= CAR_SHARP_CONFIRM_TICKS)
+		{
+			Car_ModeBStartForwardToQ();
+			return 1;
+		}
+	}
+	else
+	{
+		Sharp_Left_Count = 0;
+		Sharp_Right_Count = 0;
+	}
+	return 0;
+}
+
+static void Car_RunModeBNav(void)
+{
+	if (ModeB_State == CAR_MODE_B_STATE_FORWARD_TO_Q)
+	{
+		Line_Mode = 'Q';
+		if (Car_ModeBRunEncoderStraight(1, CAR_MODE_B_Q_FORWARD_COUNT))
+		{
+			Car_Stop();
+			ModeB_Stop_Tick = CAR_MODE_B_STOP_TICKS;
+			ModeB_State = CAR_MODE_B_STATE_STOP_Q;
+		}
+		return;
+	}
+
+	if (ModeB_State == CAR_MODE_B_STATE_STOP_Q)
+	{
+		Car_Stop();
+		Line_Mode = 'Q';
+		if (ModeB_Stop_Tick > 0)
+		{
+			ModeB_Stop_Tick--;
+			return;
+		}
+		ModeB_State = CAR_MODE_B_STATE_TURN_TO_O;
+		Car_ModeBStartEncoderTurn(Car_GetModeBQTurnDirection());
+		return;
+	}
+
+	if (ModeB_State == CAR_MODE_B_STATE_TURN_TO_O)
+	{
+		Car_RunSharpTurn();
+		return;
+	}
+
+	if (ModeB_State == CAR_MODE_B_STATE_FORWARD_TO_LINE)
+	{
+		Line_Mode = 'O';
+		if (Gray_ActiveCount >= CAR_MODE_B_LINE_ACTIVE_MIN)
+		{
+			Car_Stop();
+			ModeB_Stop_Tick = CAR_MODE_B_STOP_TICKS;
+			ModeB_State = CAR_MODE_B_STATE_STOP_O;
+			return;
+		}
+		Car_ModeBRunEncoderStraight(0, 0);
+		return;
+	}
+
+	if (ModeB_State == CAR_MODE_B_STATE_STOP_O)
+	{
+		Car_Stop();
+		Line_Mode = 'O';
+		if (ModeB_Stop_Tick > 0)
+		{
+			ModeB_Stop_Tick--;
+			return;
+		}
+		Car_ModeBStartRejoinTurn();
+		return;
+	}
+
+	if (ModeB_State == CAR_MODE_B_STATE_REJOIN_TURN)
+	{
+		Car_RunSharpTurn();
+	}
+}
+
 static void Car_FinishSharpTurn(void)
 {
 	Turn_Last_Forward_Count = Turn_Forward_Count;
 	Car_ResetLineController();
 	Turn_Cooldown_Tick = CAR_TURN_COOLDOWN_TICKS;
 	Line_Mode = 'K';
+
+	if (ModeB_State == CAR_MODE_B_STATE_TURN_TO_O)
+	{
+		ModeB_State = CAR_MODE_B_STATE_FORWARD_TO_LINE;
+		Line_Mode = 'O';
+		Car_ModeBStartStraight();
+		return;
+	}
+	if (ModeB_State == CAR_MODE_B_STATE_REJOIN_TURN)
+	{
+		ModeB_State = CAR_MODE_B_STATE_AFTER_REJOIN;
+		Route_SegmentTurnCount = 0;
+		return;
+	}
 
 	/*
 	 * 当前 T 的固定动作结束后，才结束目标路段计时。
@@ -630,6 +1000,12 @@ static void Car_LineFollowStraight(void)
 
 	Grayscale_Tick();
 
+	if (Car_IsModeBNavBusy())
+	{
+		Car_RunModeBNav();
+		return;
+	}
+
 	if (Line_State != CAR_LINE_STATE_FOLLOW)
 	{
 		Car_RunSharpTurn();
@@ -641,6 +1017,11 @@ static void Car_LineFollowStraight(void)
 		Turn_Cooldown_Tick--;
 		Sharp_Left_Count = 0;
 		Sharp_Right_Count = 0;
+	}
+	else if (Car_UpdateModeBFirstTDetect())
+	{
+		Car_RunModeBNav();
+		return;
 	}
 	else if (Car_UpdateSharpTurnDetect())
 	{
@@ -724,11 +1105,12 @@ static void OLED_ShowTrackPage(void)
 	OLED_Printf(0, 32, OLED_8X16, "MODE:%s", (char *)Car_RouteModeText[Route_SelectedMode]);
 	if (Route_Done)
 	{
-		OLED_ShowString(0, 48, "SEG:DONE", OLED_8X16);
+		OLED_Printf(0, 48, OLED_8X16, "SEG:DONE  %c", (Work_Mode == CAR_WORK_MODE_B) ? 'B' : 'A');
 	}
 	else
 	{
-		OLED_Printf(0, 48, OLED_8X16, "SEG:%c-%c", Step->From, Step->To);
+		OLED_Printf(0, 48, OLED_8X16, "SEG:%c-%c    %c", Step->From, Step->To,
+		            (Work_Mode == CAR_WORK_MODE_B) ? 'B' : 'A');
 	}
 	OLED_Update();
 }
@@ -778,8 +1160,16 @@ static void OLED_Task(void)
 static void Key_Task(void)
 {
 	uint8_t KeyNum;
+	uint8_t KeyLongNum;
 
 	Key_Tick();
+	KeyLongNum = Key_GetLongNum();
+	if ((KeyLongNum == KEY_LONG_K3) && !Car_Running)
+	{
+		Car_ToggleWorkMode();
+		return;
+	}
+
 	KeyNum = Key_GetNum();
 	if (KeyNum == KEY_NUM_K1)
 	{
