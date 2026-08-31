@@ -31,7 +31,8 @@
 #define US3_TRIG_PIN           GPIO_Pin_14
 #define US3_ECHO_PIN           GPIO_Pin_13
 
-#define US_TIMEOUT_US          30000UL
+/* 40cm以内的回波约在2.3ms内返回，5ms超时可减少无回波时对主循环的阻塞。 */
+#define US_TIMEOUT_US          5000UL
 #define US_INVALID_DISTANCE_CM 0xFFFFU
 
 typedef enum

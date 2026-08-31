@@ -5,6 +5,7 @@
 #include "Motor.h"
 #include "Encoder.h"
 #include "Grayscale.h"
+#include "Ultrasonic.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
 #define CAR_BASE_PWM               25.0f
@@ -61,6 +62,20 @@
 #define CAR_MODE_B_LINE_ACTIVE_MIN   5
 /* 可调窗口：模式B重新回到黑线后，后面第几个 T 路口才算 A-D/D-A 路段结束。 */
 #define CAR_MODE_B_REJOIN_T_COUNT    3
+
+/* 可调窗口：超声波采样间隔，每个周期约10ms；前方和当前外侧模块轮流采样。 */
+#define CAR_ULTRASONIC_SAMPLE_TICKS  10
+/* 可调窗口：外围物块认定范围，单位厘米。 */
+#define CAR_OBJECT_MIN_CM            20
+#define CAR_OBJECT_MAX_CM            40
+/* 可调窗口：物块离开范围的释放阈值，留出滞回避免边界抖动重复计数。 */
+#define CAR_OBJECT_RELEASE_CM        45
+/* 可调窗口：连续多少次进入20~40cm才计为发现一个物块。 */
+#define CAR_OBJECT_CONFIRM_SAMPLES   3
+/* 可调窗口：连续多少次离开释放范围才允许下一物块重新计数。 */
+#define CAR_OBJECT_RELEASE_SAMPLES   3
+/* 可调窗口：最多显示/统计题目要求的3个外围物块。 */
+#define CAR_OBJECT_MAX_COUNT         3
 
 #define CAR_LINE_STATE_FOLLOW      0
 #define CAR_LINE_STATE_APPROACH    1
@@ -160,6 +175,26 @@ static uint16_t ModeB_Stop_Tick = 0;
 static int32_t ModeB_Straight_Left_Total = 0;
 static int32_t ModeB_Straight_Right_Total = 0;
 static uint16_t ModeB_Straight_Count = 0;
+static uint16_t Ultrasonic_Front_Distance = US_INVALID_DISTANCE_CM;
+static uint16_t Ultrasonic_Side_Distance = US_INVALID_DISTANCE_CM;
+static UltrasonicChannel_t Ultrasonic_ActiveSide = US_CH_RIGHT;
+static uint8_t Ultrasonic_Sample_Tick = 0;
+static uint8_t Ultrasonic_NextChannel = 0;
+static uint8_t Object_Count = 0;
+static uint8_t Object_Enter_Count = 0;
+static uint8_t Object_Release_Count = 0;
+static uint8_t Object_Latched = 0;
+static uint32_t Car_Time_LastCycle = 0;
+static uint8_t Car_Time_Ready = 0;
+
+/* 本工程使用的老版本 CMSIS 未提供 DWT 结构体定义，这里只声明所需的两个寄存器。 */
+typedef struct
+{
+	volatile uint32_t CTRL;
+	volatile uint32_t CYCCNT;
+} CAR_DWT_Type;
+
+#define CAR_DWT ((CAR_DWT_Type *)0xE0001000UL)
 
 static void Car_RunSharpTurn(void);
 
@@ -175,6 +210,42 @@ static uint8_t LimitForwardPWM(float Value)
 	if (Value > CAR_PWM_LIMIT) {return (uint8_t)CAR_PWM_LIMIT;}
 	if (Value < CAR_MIN_FORWARD_PWM) {return (uint8_t)CAR_MIN_FORWARD_PWM;}
 	return (uint8_t)Value;
+}
+
+static void Car_TimeInit(void)
+{
+	/* 使用 Cortex-M3 的 DWT 周期计数器，不占用 TIM2/TIM3/TIM4 等外设定时器。 */
+	CoreDebug->DEMCR |= 0x01000000UL;
+	CAR_DWT->CYCCNT = 0;
+	CAR_DWT->CTRL |= 0x00000001UL;
+	Car_Time_LastCycle = CAR_DWT->CYCCNT;
+	Car_Time_Ready = 1;
+}
+
+static void Car_TimeSync(void)
+{
+	if (Car_Time_Ready)
+	{
+		Car_Time_LastCycle = CAR_DWT->CYCCNT;
+	}
+}
+
+static uint32_t Car_TimeElapsedMs(void)
+{
+	uint32_t CurrentCycle;
+	uint32_t DeltaCycle;
+
+	if (!Car_Time_Ready)
+	{
+		Car_TimeInit();
+		return CAR_LOOP_PERIOD_MS;
+	}
+
+	CurrentCycle = CAR_DWT->CYCCNT;
+	DeltaCycle = CurrentCycle - Car_Time_LastCycle;
+	Car_Time_LastCycle = CurrentCycle;
+	return (uint32_t)(((uint64_t)DeltaCycle * 1000ULL)
+	                / (uint64_t)SystemCoreClock);
 }
 
 static int8_t LimitSignedPWM(int16_t Value)
@@ -253,6 +324,109 @@ static void Car_ResetEncoderTotals(void)
 	Turn_Entry_Right_Total = 0;
 	Turn_Forward_Count = 0;
 	Turn_Last_Forward_Count = 0;
+}
+
+static UltrasonicChannel_t Car_GetActiveUltrasonicSide(void)
+{
+	/* 0~3为顺时针起步路线，车外侧在右边；4~7为逆时针路线，车外侧在左边。 */
+	if (Route_SelectedMode < 4u)
+	{
+		return US_CH_RIGHT;
+	}
+	return US_CH_LEFT;
+}
+
+static void Car_ResetUltrasonicDetection(void)
+{
+	Ultrasonic_Front_Distance = US_INVALID_DISTANCE_CM;
+	Ultrasonic_Side_Distance = US_INVALID_DISTANCE_CM;
+	Ultrasonic_ActiveSide = Car_GetActiveUltrasonicSide();
+	Ultrasonic_Sample_Tick = 0;
+	Ultrasonic_NextChannel = 0;
+	Object_Count = 0;
+	Object_Enter_Count = 0;
+	Object_Release_Count = 0;
+	Object_Latched = 0;
+}
+
+static void Car_UpdateObjectCount(uint16_t Distance)
+{
+	uint8_t InObjectRange;
+
+	InObjectRange = (Distance != US_INVALID_DISTANCE_CM)
+	             && (Distance >= CAR_OBJECT_MIN_CM)
+	             && (Distance <= CAR_OBJECT_MAX_CM);
+
+	if (InObjectRange)
+	{
+		Object_Release_Count = 0;
+		if (Object_Enter_Count < CAR_OBJECT_CONFIRM_SAMPLES)
+		{
+			Object_Enter_Count++;
+		}
+		if (!Object_Latched
+			&& (Object_Enter_Count >= CAR_OBJECT_CONFIRM_SAMPLES))
+		{
+			if (Object_Count < CAR_OBJECT_MAX_COUNT)
+			{
+				Object_Count++;
+			}
+			Object_Latched = 1;
+		}
+	}
+	else
+	{
+		Object_Enter_Count = 0;
+		if ((Distance == US_INVALID_DISTANCE_CM)
+		 || (Distance < CAR_OBJECT_MIN_CM)
+		 || (Distance > CAR_OBJECT_RELEASE_CM))
+		{
+			if (Object_Release_Count < CAR_OBJECT_RELEASE_SAMPLES)
+			{
+				Object_Release_Count++;
+			}
+			if (Object_Release_Count >= CAR_OBJECT_RELEASE_SAMPLES)
+			{
+				Object_Latched = 0;
+			}
+		}
+	}
+}
+
+static void Car_UltrasonicTask(void)
+{
+	uint16_t Distance;
+
+	/* 基本要求3的外围物块统计只在模式A的地图循迹过程中启用。 */
+	if ((Work_Mode != CAR_WORK_MODE_A)
+	 || !Car_Running
+	 || !Route_Active
+	 || Route_Done)
+	{
+		return;
+	}
+
+	if (++Ultrasonic_Sample_Tick < CAR_ULTRASONIC_SAMPLE_TICKS)
+	{
+		return;
+	}
+	Ultrasonic_Sample_Tick = 0;
+	Ultrasonic_ActiveSide = Car_GetActiveUltrasonicSide();
+
+	/* 前方和当前外侧模块轮流测量，避免三个 HC-SR04 同时发声串扰。 */
+	if (Ultrasonic_NextChannel == 0u)
+	{
+		Distance = Ultrasonic_GetDistanceCm(US_CH_FRONT);
+		Ultrasonic_Front_Distance = Distance;
+		Ultrasonic_NextChannel = 1u;
+	}
+	else
+	{
+		Distance = Ultrasonic_GetDistanceCm(Ultrasonic_ActiveSide);
+		Ultrasonic_Side_Distance = Distance;
+		Car_UpdateObjectCount(Distance);
+		Ultrasonic_NextChannel = 0u;
+	}
 }
 
 static void Car_ResetModeBNav(void)
@@ -336,6 +510,8 @@ static uint8_t Car_IsCurrentModeBSpecialSegment(void)
 static void Car_StartRouteTiming(void)
 {
 	Car_ResetRouteTiming();
+	Car_ResetUltrasonicDetection();
+	Car_TimeSync();
 	Route_Active = 1;
 	Route_JustStarted = 1;
 }
@@ -347,15 +523,27 @@ static void Car_StopRouteTiming(void)
 
 static void Car_UpdateRouteTiming(void)
 {
+	uint32_t ElapsedMs;
+
 	if (Route_JustStarted)
 	{
 		Route_JustStarted = 0;
+		Car_TimeSync();
 		return;
 	}
 
 	if (Route_Active && !Route_Done && (Route_CurrentSegment < CAR_ROUTE_SEGMENT_COUNT))
 	{
-		Route_CurrentMs += CAR_LOOP_PERIOD_MS;
+		ElapsedMs = Car_TimeElapsedMs();
+		if (ElapsedMs == 0u)
+		{
+			ElapsedMs = 1u;
+		}
+		Route_CurrentMs += ElapsedMs;
+	}
+	else
+	{
+		Car_TimeSync();
 	}
 }
 
@@ -450,6 +638,7 @@ static uint8_t Car_IsRightEdgePairTSignal(void)
 static void Car_NextRouteMode(void)
 {
 	Route_SelectedMode = (uint8_t)((Route_SelectedMode + 1u) % CAR_ROUTE_MODE_COUNT);
+	Car_ResetUltrasonicDetection();
 	Car_ResetModeBNav();
 }
 
@@ -463,6 +652,7 @@ static void Car_ToggleWorkMode(void)
 	{
 		Work_Mode = CAR_WORK_MODE_A;
 	}
+	Car_ResetUltrasonicDetection();
 	Car_ResetModeBNav();
 }
 
@@ -1123,6 +1313,9 @@ static void OLED_ShowRoutePage(void)
 	uint32_t Sec;
 	uint32_t Centi;
 	const CAR_ROUTE_STEP *Step;
+	uint16_t FrontDistance;
+	uint16_t SideDistance;
+	char SideLabel;
 
 	OLED_Clear();
 	if (Route_Done || (Route_CurrentSegment >= CAR_ROUTE_SEGMENT_COUNT))
@@ -1142,6 +1335,14 @@ static void OLED_ShowRoutePage(void)
 		OLED_Printf(0, (int16_t)(i * 10u), OLED_6X8, "%c-%c:%02lu.%02luS",
 		            Step->From, Step->To, (unsigned long)Sec, (unsigned long)Centi);
 	}
+	FrontDistance = (Ultrasonic_Front_Distance == US_INVALID_DISTANCE_CM)
+	              ? 0u : Ultrasonic_Front_Distance;
+	SideDistance = (Ultrasonic_Side_Distance == US_INVALID_DISTANCE_CM)
+	             ? 0u : Ultrasonic_Side_Distance;
+	SideLabel = (Ultrasonic_ActiveSide == US_CH_RIGHT) ? 'R' : 'L';
+	OLED_Printf(0, 40, OLED_6X8, "F:%3ucm %c:%3ucm",
+	            (unsigned int)FrontDistance, SideLabel, (unsigned int)SideDistance);
+	OLED_Printf(0, 50, OLED_6X8, "OBJ:%u", (unsigned int)Object_Count);
 	OLED_Update();
 }
 
@@ -1205,6 +1406,9 @@ int main(void)
 	Motor_Init();
 	Encoder_Init();
 	Grayscale_Init();
+	Ultrasonic_Init();
+	Car_TimeInit();
+	Car_ResetUltrasonicDetection();
 	Car_Stop();
 
 	OLED_Clear();
@@ -1232,6 +1436,7 @@ int main(void)
 			Line_Error = Car_CalcLineError();
 		}
 
+		Car_UltrasonicTask();
 		Car_UpdateRouteTiming();
 
 		if (++DisplayLoopCount >= 5)
