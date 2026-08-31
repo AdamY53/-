@@ -8,9 +8,9 @@
 #include "Ultrasonic.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               25.0f
-#define CAR_LINE_KP                0.092f
-#define CAR_LINE_KD                0.180f
+#define CAR_BASE_PWM               24.0f
+#define CAR_LINE_KP                0.050f
+#define CAR_LINE_KD                0.000f
 #define CAR_ENCODER_BALANCE_KP     0.350f
 #define CAR_STEER_LIMIT            26.0f
 #define CAR_BALANCE_LIMIT          8.0f
@@ -33,15 +33,15 @@
 #define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
 #define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
-#define CAR_FIXED_TURN_PWM           30
+#define CAR_FIXED_TURN_PWM           23
 /* 可调窗口：左转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_LEFT_TURN_LEFT_TARGET    (-450)
+#define CAR_LEFT_TURN_LEFT_TARGET    (-590)
 /* 可调窗口：左转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_LEFT_TURN_RIGHT_TARGET   730
+#define CAR_LEFT_TURN_RIGHT_TARGET   700
 /* 可调窗口：右转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_RIGHT_TURN_LEFT_TARGET   450
+#define CAR_RIGHT_TURN_LEFT_TARGET   700
 /* 可调窗口：右转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_RIGHT_TURN_RIGHT_TARGET  (-730)
+#define CAR_RIGHT_TURN_RIGHT_TARGET  (-590)
 /* 可调窗口：编码器未达到目标时的最大固定转弯周期数，每个周期约10ms。 */
 #define CAR_FIXED_TURN_MAX_TICKS     300
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，每个周期约 10ms，屏蔽期内不再次触发 90 度转弯。 */
@@ -588,21 +588,35 @@ static void Car_AdvanceRouteSegment(void)
 static int16_t Car_CalcLineError(void)
 {
 	int16_t PositionSum;
+	uint8_t LineActiveCount;
 
-	if (Gray_ActiveCount == 0)
+	/*
+	 * 普通循迹只滤波中间三路：
+	 * L3/L2/R2/R3 保持原始值，L1/M/R1 使用 Gray_LineSensor 的多数滤波值。
+	 * T 路口判断仍走 Gray_Sensor 原始数据，不受这里影响。
+	 */
+	LineActiveCount = Gray_Sensor[GRAY_IDX_L3]
+	                + Gray_Sensor[GRAY_IDX_L2]
+	                + Gray_LineSensor[GRAY_IDX_L1]
+	                + Gray_LineSensor[GRAY_IDX_M]
+	                + Gray_LineSensor[GRAY_IDX_R1]
+	                + Gray_Sensor[GRAY_IDX_R2]
+	                + Gray_Sensor[GRAY_IDX_R3];
+
+	if (LineActiveCount == 0)
 	{
 		return 0;
 	}
 
 	PositionSum = Gray_Sensor[GRAY_IDX_L3] * (-300)
 	            + Gray_Sensor[GRAY_IDX_L2] * (-200)
-	            + Gray_Sensor[GRAY_IDX_L1] * (-100)
-	            + Gray_Sensor[GRAY_IDX_M]  * 0
-	            + Gray_Sensor[GRAY_IDX_R1] * 100
+	            + Gray_LineSensor[GRAY_IDX_L1] * (-100)
+	            + Gray_LineSensor[GRAY_IDX_M]  * 0
+	            + Gray_LineSensor[GRAY_IDX_R1] * 100
 	            + Gray_Sensor[GRAY_IDX_R2] * 200
 	            + Gray_Sensor[GRAY_IDX_R3] * 300;
 
-	return PositionSum / Gray_ActiveCount;
+	return PositionSum / LineActiveCount;
 }
 
 static uint8_t Car_CountLeftTurnSensors(void)
