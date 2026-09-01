@@ -22,8 +22,6 @@
 
 #define GRAY_ACTIVE_LEVEL    1
 #define GRAY_SENSOR_COUNT    7
-/* 可调窗口：中间三路循迹信号使用的多数滤波采样数，保持为奇数；3表示最近3次采样至少2次为高才输出高。 */
-#define GRAY_MIDDLE_FILTER_WINDOW 3
 
 #define GRAY_IDX_L3          0
 #define GRAY_IDX_L2          1
@@ -39,8 +37,6 @@ void Grayscale_Tick(void);
 
 extern volatile uint16_t Gray_State;
 extern volatile uint8_t Gray_Sensor[GRAY_SENSOR_COUNT];
-/* 循迹专用信号：外侧四路保持原始值，中间 L1/M/R1 使用多数滤波值。 */
-extern volatile uint8_t Gray_LineSensor[GRAY_SENSOR_COUNT];
 extern volatile uint8_t Gray_ActiveCount;
 
 #endif
