@@ -8,21 +8,21 @@
 #include "Ultrasonic.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               32.0f
-#define CAR_LINE_KP                0.088f
-#define CAR_LINE_KD                0.05f
+#define CAR_BASE_PWM               25.0f
+#define CAR_LINE_KP                0.092f
+#define CAR_LINE_KD                0.180f
 #define CAR_ENCODER_BALANCE_KP     0.350f
-#define CAR_STEER_LIMIT            25.0f
-#define CAR_BALANCE_LIMIT          5.0f
-#define CAR_MIN_FORWARD_PWM        19.0f
-#define CAR_PWM_LIMIT              60.0f
+#define CAR_STEER_LIMIT            26.0f
+#define CAR_BALANCE_LIMIT          8.0f
+#define CAR_MIN_FORWARD_PWM        10.0f
+#define CAR_PWM_LIMIT              70.0f
 
 /* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 10ms，数值越大越不容易误触发。 */
 #define CAR_SHARP_CONFIRM_TICKS    1
 /* 可调窗口：T 路口判定时，M+左侧三路或 M+右侧三路中至少几个高电平才触发。 */
 #define CAR_SHARP_GROUP_ACTIVE_MIN 3
 /* 可调窗口：边缘双探头 T 路口兜底开关。1=最左两路或最右两路同时高电平也触发前进转弯。 */
-#define CAR_EDGE_PAIR_T_ENABLE     0
+#define CAR_EDGE_PAIR_T_ENABLE     1
 /* 可调窗口：检测到 T 路口后先前进的编码器累计值，单位和 OLED 第五行 L/R 显示一致。 */
 #define CAR_TURN_ENTRY_FORWARD_COUNT 300
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
@@ -33,7 +33,7 @@
 #define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
 #define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
-#define CAR_FIXED_TURN_PWM           28
+#define CAR_FIXED_TURN_PWM           30
 /* 可调窗口：左转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
 #define CAR_LEFT_TURN_LEFT_TARGET    (-450)
 /* 可调窗口：左转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
@@ -205,21 +205,6 @@ static float LimitFloat(float Value, float Min, float Max)
 	return Value;
 }
 
-static float Car_ConvertPWMToSpeedTarget(float PWM)
-{
-	if (PWM < 0.0f)
-	{
-		PWM = 0.0f;
-	}
-
-	/*
-	 * 把“命令 PWM”换成“每个主循环期望的编码器计数目标”。
-	 * 这里先用一个固定比例做内环目标换算，目的是让外环只管循迹偏差，
-	 * 内环只管左右轮真实速度，不再直接拿左右轮差值去硬修 PWM。
-	 */
-	return PWM * 0.20f;
-}
-
 static uint8_t LimitForwardPWM(float Value)
 {
 	if (Value > CAR_PWM_LIMIT) {return (uint8_t)CAR_PWM_LIMIT;}
@@ -300,43 +285,6 @@ static void Car_ClearLinePD(void)
 	Line_Derivative = 0;
 	Line_Steer_PWM = 0;
 	Encoder_Balance_PWM = 0;
-}
-
-static void Car_ApplyWheelSpeedClosedLoop(float LeftCommandPWM, float RightCommandPWM)
-{
-	float LeftTargetSpeed;
-	float RightTargetSpeed;
-	float LeftSpeedError;
-	float RightSpeedError;
-	float LeftPWM;
-	float RightPWM;
-	float LeftCorrection;
-	float RightCorrection;
-
-	LeftTargetSpeed = Car_ConvertPWMToSpeedTarget(LeftCommandPWM);
-	RightTargetSpeed = Car_ConvertPWMToSpeedTarget(RightCommandPWM);
-	LeftSpeedError = LeftTargetSpeed - (float)Encoder_Left;
-	RightSpeedError = RightTargetSpeed - (float)Encoder_Right;
-
-	/* 内环：按左右轮各自的编码器速度误差做补偿。这样外环只需要算“往哪边偏”，
-	 * 不再直接拿“左右轮差值”去硬怼 PWM。 */
-	LeftCorrection = LeftSpeedError * CAR_ENCODER_BALANCE_KP;
-	RightCorrection = RightSpeedError * CAR_ENCODER_BALANCE_KP;
-	LeftCorrection = LimitFloat(LeftCorrection, -CAR_BALANCE_LIMIT, CAR_BALANCE_LIMIT);
-	RightCorrection = LimitFloat(RightCorrection, -CAR_BALANCE_LIMIT, CAR_BALANCE_LIMIT);
-
-	LeftPWM = LimitFloat(LeftCommandPWM + LeftCorrection,
-	                     CAR_MIN_FORWARD_PWM, CAR_PWM_LIMIT);
-	RightPWM = LimitFloat(RightCommandPWM + RightCorrection,
-	                      CAR_MIN_FORWARD_PWM, CAR_PWM_LIMIT);
-
-	/* 这两个调试量保留给后面看趋势，不影响 OLED 现有显示逻辑。 */
-	Line_Steer_PWM = (int8_t)LimitFloat(LeftCommandPWM - RightCommandPWM,
-	                                    -100.0f, 100.0f);
-	Encoder_Balance_PWM = (int8_t)LimitFloat(RightCorrection - LeftCorrection,
-	                                        -100.0f, 100.0f);
-
-	Car_SetForwardPWM(LeftPWM, RightPWM);
 }
 
 static void Car_ResetLineController(void)
@@ -856,6 +804,8 @@ static void Car_ModeBStartStraight(void)
 static uint8_t Car_ModeBRunEncoderStraight(uint8_t HasTarget, uint16_t TargetCount)
 {
 	int32_t ForwardDelta;
+	int16_t SpeedDiff;
+	float Balance;
 	float LeftPWM;
 	float RightPWM;
 
@@ -871,9 +821,15 @@ static uint8_t Car_ModeBRunEncoderStraight(uint8_t HasTarget, uint16_t TargetCou
 		ForwardDelta = 65535;
 	}
 	ModeB_Straight_Count = (uint16_t)ForwardDelta;
-	LeftPWM = CAR_BASE_PWM;
-	RightPWM = CAR_BASE_PWM;
-	Car_ApplyWheelSpeedClosedLoop(LeftPWM, RightPWM);
+
+	SpeedDiff = Encoder_Left - Encoder_Right;
+	Balance = (float)SpeedDiff * CAR_ENCODER_BALANCE_KP;
+	Balance = LimitFloat(Balance, -CAR_BALANCE_LIMIT, CAR_BALANCE_LIMIT);
+	Encoder_Balance_PWM = (int8_t)Balance;
+	Line_Steer_PWM = 0;
+	LeftPWM = CAR_BASE_PWM - Balance;
+	RightPWM = CAR_BASE_PWM + Balance;
+	Car_SetForwardPWM(LeftPWM, RightPWM);
 
 	if (HasTarget
 	 && ((ModeB_Straight_Count + CAR_TURN_ENTRY_COUNT_WINDOW) >= TargetCount))
@@ -1227,8 +1183,10 @@ static void Car_RunSharpTurn(void)
 static void Car_LineFollowStraight(void)
 {
 	float Steer;
+	float Balance;
 	float LeftPWM;
 	float RightPWM;
+	int16_t SpeedDiff;
 
 	Grayscale_Tick();
 
@@ -1270,10 +1228,15 @@ static void Car_LineFollowStraight(void)
 	      + (float)Line_Derivative * CAR_LINE_KD;
 	Steer = LimitFloat(Steer, -CAR_STEER_LIMIT, CAR_STEER_LIMIT);
 
+	SpeedDiff = Encoder_Left - Encoder_Right;
+	Balance = (float)SpeedDiff * CAR_ENCODER_BALANCE_KP;
+	Balance = LimitFloat(Balance, -CAR_BALANCE_LIMIT, CAR_BALANCE_LIMIT);
+
 	Line_Steer_PWM = (int8_t)Steer;
-	LeftPWM = CAR_BASE_PWM + Steer;
-	RightPWM = CAR_BASE_PWM - Steer;
-	Car_ApplyWheelSpeedClosedLoop(LeftPWM, RightPWM);
+	Encoder_Balance_PWM = (int8_t)Balance;
+	LeftPWM = CAR_BASE_PWM + Steer - Balance;
+	RightPWM = CAR_BASE_PWM - Steer + Balance;
+	Car_SetForwardPWM(LeftPWM, RightPWM);
 }
 
 static void OLED_ShowLineStateRToL(uint8_t X, uint8_t Y, uint8_t FontSize)
