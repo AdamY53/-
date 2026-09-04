@@ -8,21 +8,21 @@
 #include "Ultrasonic.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               25.0f
-#define CAR_LINE_KP                0.092f
-#define CAR_LINE_KD                0.180f
+#define CAR_BASE_PWM               32.0f
+#define CAR_LINE_KP                0.084f
+#define CAR_LINE_KD                0.064f
 #define CAR_ENCODER_BALANCE_KP     0.350f
-#define CAR_STEER_LIMIT            26.0f
-#define CAR_BALANCE_LIMIT          8.0f
-#define CAR_MIN_FORWARD_PWM        10.0f
-#define CAR_PWM_LIMIT              70.0f
+#define CAR_STEER_LIMIT            25.0f
+#define CAR_BALANCE_LIMIT          5.0f
+#define CAR_MIN_FORWARD_PWM        16.0f
+#define CAR_PWM_LIMIT              60.0f
 
 /* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 10ms，数值越大越不容易误触发。 */
 #define CAR_SHARP_CONFIRM_TICKS    1
 /* 可调窗口：T 路口判定时，M+左侧三路或 M+右侧三路中至少几个高电平才触发。 */
 #define CAR_SHARP_GROUP_ACTIVE_MIN 3
 /* 可调窗口：边缘双探头 T 路口兜底开关。1=最左两路或最右两路同时高电平也触发前进转弯。 */
-#define CAR_EDGE_PAIR_T_ENABLE     1
+#define CAR_EDGE_PAIR_T_ENABLE     0
 /* 可调窗口：检测到 T 路口后先前进的编码器累计值，单位和 OLED 第五行 L/R 显示一致。 */
 #define CAR_TURN_ENTRY_FORWARD_COUNT 300
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
@@ -33,13 +33,13 @@
 #define CAR_T_LEFT_ACTION           CAR_TURN_LEFT
 #define CAR_T_RIGHT_ACTION          CAR_TURN_RIGHT
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
-#define CAR_FIXED_TURN_PWM           30
+#define CAR_FIXED_TURN_PWM           27
 /* 可调窗口：左转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_LEFT_TURN_LEFT_TARGET    (-450)
+#define CAR_LEFT_TURN_LEFT_TARGET    (-440)
 /* 可调窗口：左转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
 #define CAR_LEFT_TURN_RIGHT_TARGET   730
 /* 可调窗口：右转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_RIGHT_TURN_LEFT_TARGET   450
+#define CAR_RIGHT_TURN_LEFT_TARGET   440
 /* 可调窗口：右转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
 #define CAR_RIGHT_TURN_RIGHT_TARGET  (-730)
 /* 可调窗口：编码器未达到目标时的最大固定转弯周期数，每个周期约10ms。 */
@@ -48,7 +48,7 @@
 #define CAR_TURN_COOLDOWN_TICKS      24
 
 /* 主循环固定时间片：约 10ms。当前仅做循迹、路口和计时逻辑。 */
-#define CAR_LOOP_PERIOD_MS           10
+#define CAR_LOOP_PERIOD_MS           20
 
 /* 可调窗口：A-D/D-A 路段包含 4 个中间 T 和第 5 个目标 T。 */
 #define CAR_ROUTE_AD_T_COUNT         5
@@ -77,9 +77,38 @@
 /* 可调窗口：最多显示/统计题目要求的3个外围物块。 */
 #define CAR_OBJECT_MAX_COUNT         3
 
+/* ===== 贴壁模式 C 参数窗口 =====
+ * 算法移植自 github.com/aqib-m31/Wall-Following-Robot-PID，
+ * 适配本工程：前方墙用编码器闭环 90°（复用转弯宏），丢墙用弧转找回，
+ * 灰度≥CAR_WALL_LINE_EXIT_MIN 路亮=重新上黑线时退出贴壁恢复循迹。 */
+#define CAR_WALL_SIDE_LEFT          0   /* 贴左壁 */
+#define CAR_WALL_SIDE_RIGHT         1   /* 贴右壁 */
+#define CAR_WALL_DEFAULT_SIDE       CAR_WALL_SIDE_LEFT  /* 固定贴壁侧；实车贴错侧/方向反只改这里 */
+#define CAR_WALL_SETPOINT_CM        15  /* 目标贴墙距离：=OLED Route 页 L/R 实测显示值 */
+#define CAR_WALL_FRONT_CM           20  /* 前方墙判定阈值(cm) */
+#define CAR_WALL_LOST_CM            45  /* 侧墙丢失判定阈值(cm) */
+#define CAR_WALL_FIND_CONFIRM       3   /* 找墙/丢墙确认周期数(约30ms)，滤波用 */
+#define CAR_WALL_REACQ_MAX_TICKS    150 /* 丢墙找回超时(约1.5s)，超时停车防绕圈 */
+#define CAR_WALL_BASE_PWM           26  /* 贴壁基础速度 */
+#define CAR_WALL_MIN_PWM            12  /* 差速输出下限（不低于0且差速不失效） */
+#define CAR_WALL_KP_DIST            0.45f   /* 距离环P：误差=实测-目标(cm)，车离墙太近就调小 */
+#define CAR_WALL_KI_DIST            0.003f  /* 距离环I：消静态偏差，慎用 */
+#define CAR_WALL_KD_DIST            1.8f    /* 距离环D：抑制画龙，调大可消左右摆 */
+#define CAR_WALL_FRONT_GAIN         3.0f    /* 前探头近墙(但未到拐角)时额外外撇修正 */
+#define CAR_WALL_FRONT_PULL_CM      30      /* 前探头低于此值启用 FRONT_GAIN */
+#define CAR_WALL_LINE_EXIT_MIN      3       /* 灰度几路亮=重新上黑线，退出贴壁 */
+#define CAR_WALL_MAX_CORR           10      /* 单帧最大转向修正(0-100 PWM 尺度) */
+#define CAR_WALL_AFTER_CORNER_IGNORE 12     /* 拐角转完后屏蔽前墙判断的周期数(约120ms) */
+
 #define CAR_LINE_STATE_FOLLOW      0
 #define CAR_LINE_STATE_APPROACH    1
 #define CAR_LINE_STATE_FIXED_TURN  2
+
+#define CAR_WALL_STATE_IDLE        0   /* 未激活 */
+#define CAR_WALL_STATE_FIND        1   /* 朝墙侧转，找墙 */
+#define CAR_WALL_STATE_FOLLOW      2   /* 贴壁 PID 行进 */
+#define CAR_WALL_STATE_CORNER      3   /* 前方墙：编码器闭环原地90° */
+#define CAR_WALL_STATE_REACQ       4   /* 侧墙丢失：弧转找回 */
 
 #define CAR_TURN_NONE              0
 #define CAR_TURN_LEFT              1
@@ -90,6 +119,7 @@
 
 #define CAR_WORK_MODE_A             0
 #define CAR_WORK_MODE_B             1
+#define CAR_WORK_MODE_C             2   /* 贴壁行驶（移植自 Wall-Following-Robot-PID） */
 
 #define CAR_MODE_B_STATE_IDLE            0
 #define CAR_MODE_B_STATE_FORWARD_TO_Q    1
@@ -184,6 +214,16 @@ static uint8_t Object_Count = 0;
 static uint8_t Object_Enter_Count = 0;
 static uint8_t Object_Release_Count = 0;
 static uint8_t Object_Latched = 0;
+
+/* 贴壁模式 C 运行状态 */
+static uint8_t Wall_Active = 0;
+static uint8_t Wall_State = CAR_WALL_STATE_IDLE;
+static uint8_t Wall_Side = CAR_WALL_SIDE_LEFT;   /* 当前贴壁侧（进入C时用默认侧） */
+static int16_t Wall_LastError = 0;
+static int32_t Wall_Integral = 0;
+static uint8_t Wall_ConfirmCount = 0;            /* 找墙/丢墙滤波计数 */
+static uint16_t Wall_TimeoutTicks = 0;           /* 找墙/拐角超时保护 */
+static uint8_t Wall_CooldownTicks = 0;           /* 拐角后屏蔽前墙判断的冷却 */
 static uint32_t Car_Time_LastCycle = 0;
 static uint8_t Car_Time_Ready = 0;
 
@@ -397,11 +437,11 @@ static void Car_UltrasonicTask(void)
 {
 	uint16_t Distance;
 
-	/* 基本要求3的外围物块统计只在模式A的地图循迹过程中启用。 */
-	if ((Work_Mode != CAR_WORK_MODE_A)
+	/* 基本要求3的外围物块统计只在模式A的地图循迹过程中启用；
+	 * 模式 C(贴壁) 也需要前探头+贴壁侧探头轮流测距。 */
+	if (((Work_Mode != CAR_WORK_MODE_A) && (Work_Mode != CAR_WORK_MODE_C))
 	 || !Car_Running
-	 || !Route_Active
-	 || Route_Done)
+	 || ((Work_Mode == CAR_WORK_MODE_A) && ((!Route_Active) || Route_Done)))
 	{
 		return;
 	}
@@ -411,7 +451,17 @@ static void Car_UltrasonicTask(void)
 		return;
 	}
 	Ultrasonic_Sample_Tick = 0;
-	Ultrasonic_ActiveSide = Car_GetActiveUltrasonicSide();
+
+	/* 模式C固定测贴壁侧；模式A按当前路线选择外侧。 */
+	if (Work_Mode == CAR_WORK_MODE_C)
+	{
+		Ultrasonic_ActiveSide = (Wall_Side == CAR_WALL_SIDE_LEFT)
+		                      ? US_CH_LEFT : US_CH_RIGHT;
+	}
+	else
+	{
+		Ultrasonic_ActiveSide = Car_GetActiveUltrasonicSide();
+	}
 
 	/* 前方和当前外侧模块轮流测量，避免三个 HC-SR04 同时发声串扰。 */
 	if (Ultrasonic_NextChannel == 0u)
@@ -424,7 +474,10 @@ static void Car_UltrasonicTask(void)
 	{
 		Distance = Ultrasonic_GetDistanceCm(Ultrasonic_ActiveSide);
 		Ultrasonic_Side_Distance = Distance;
-		Car_UpdateObjectCount(Distance);
+		if (Work_Mode == CAR_WORK_MODE_A)
+		{
+			Car_UpdateObjectCount(Distance);
+		}
 		Ultrasonic_NextChannel = 0u;
 	}
 }
@@ -644,13 +697,29 @@ static void Car_NextRouteMode(void)
 
 static void Car_ToggleWorkMode(void)
 {
+	/* K3 长按在 A(地图循迹)/B(点导航)/C(贴壁) 之间循环 */
 	if (Work_Mode == CAR_WORK_MODE_A)
 	{
 		Work_Mode = CAR_WORK_MODE_B;
 	}
+	else if (Work_Mode == CAR_WORK_MODE_B)
+	{
+		Work_Mode = CAR_WORK_MODE_C;
+		/* 进入贴壁：固定贴默认侧，K1 启动后从找墙开始 */
+		Wall_Side = CAR_WALL_DEFAULT_SIDE;
+		Wall_Active = 1;
+		Wall_State = CAR_WALL_STATE_FIND;
+		Wall_LastError = 0;
+		Wall_Integral = 0;
+		Wall_ConfirmCount = 0;
+		Wall_TimeoutTicks = 0;
+		Wall_CooldownTicks = 0;
+	}
 	else
 	{
 		Work_Mode = CAR_WORK_MODE_A;
+		Wall_Active = 0;
+		Wall_State = CAR_WALL_STATE_IDLE;
 	}
 	Car_ResetUltrasonicDetection();
 	Car_ResetModeBNav();
@@ -758,6 +827,41 @@ static void Car_StartSharpTurnEx(uint8_t Direction, uint8_t CountRouteTurn)
 static void Car_StartSharpTurn(uint8_t Direction)
 {
 	Car_StartSharpTurnEx(Direction, 1);
+}
+
+/* 贴壁专用：不先直行(跳过 APPROACH)，直接进入编码器闭环原地 90°。
+ * 由 Car_WallTask 每帧调用 Car_RunSharpTurn() 推进，转完自动复位 Line_State。 */
+static void Car_StartPivotTurn(uint8_t Direction)
+{
+	Car_ClearLinePD();
+	Line_State = CAR_LINE_STATE_FIXED_TURN;
+	Turn_Direction = Direction;
+	Turn_Tick = 0;
+	Turn_Cooldown_Tick = 0;
+	Sharp_Left_Count = 0;
+	Sharp_Right_Count = 0;
+	Turn_Entry_Left_Total = Encoder_Left_Total;
+	Turn_Entry_Right_Total = Encoder_Right_Total;
+	Turn_Forward_Count = 0;
+	Turn_Left_Encoder_Count = 0;
+	Turn_Right_Encoder_Count = 0;
+	Turn_Left_Encoder_Reached = 0;
+	Turn_Right_Encoder_Reached = 0;
+	Car_LoadTurnEncoderTargets(Direction);
+	Line_Mode = 'C';
+	Route_TurnEndsSegment = 0;
+}
+
+static void Car_ResetWallNav(void)
+{
+	Wall_Active = 0;
+	Wall_State = CAR_WALL_STATE_IDLE;
+	Wall_LastError = 0;
+	Wall_Integral = 0;
+	Wall_ConfirmCount = 0;
+	Wall_TimeoutTicks = 0;
+	Wall_CooldownTicks = 0;
+	Car_ResetLineController();
 }
 
 static uint8_t Car_GetModeBQTurnDirection(void)
@@ -1180,6 +1284,159 @@ static void Car_RunSharpTurn(void)
 	Car_SetTurnPWM(Turn_Direction, CAR_FIXED_TURN_PWM);
 }
 
+/* 贴壁主任务（模式C，每10ms一次）。
+ * 移植自 aqib-m31/Wall-Following-Robot-PID：优先级 前墙 > 丢墙 > PID贴壁；
+ * 适配本工程：前方墙用编码器闭环90°(Car_StartPivotTurn)；
+ * 灰度≥CAR_WALL_LINE_EXIT_MIN 路亮=重新上黑线 → 退出贴壁恢复普通循迹。
+ * 注意：拐角转90°后仍按原贴壁侧逻辑走，若实车拐角后墙转到另一侧，
+ * 会先进入 REACQ 找墙，属于 v1 简化行为。 */
+static void Car_WallTask(void)
+{
+	uint8_t WallFront;
+	uint8_t WallSideOk;
+	int16_t Err;
+	int16_t Deriv;
+	float PidOut;
+	int16_t Corr;
+	int16_t SpdL;
+	int16_t SpdR;
+	int16_t BasePWM = CAR_WALL_BASE_PWM;
+
+	Grayscale_Tick();
+
+	/* 正处于闭环90°转弯(CORNER)：推进转弯直到 Line_State 复位 */
+	if (Wall_State == CAR_WALL_STATE_CORNER)
+	{
+		Car_RunSharpTurn();
+		if (Line_State == CAR_LINE_STATE_FOLLOW)
+		{
+			Wall_State = CAR_WALL_STATE_FOLLOW;
+			Wall_LastError = 0;
+			Wall_Integral = 0;
+			Wall_CooldownTicks = CAR_WALL_AFTER_CORNER_IGNORE;
+		}
+		return;
+	}
+	if (Line_State != CAR_LINE_STATE_FOLLOW)
+	{
+		Car_RunSharpTurn();
+		return;
+	}
+
+	/* 出口：贴壁途中重新压到黑线 → 退出，恢复普通循迹 */
+	if (Gray_ActiveCount >= CAR_WALL_LINE_EXIT_MIN)
+	{
+		Car_ResetLineController();
+		Car_Stop();
+		Wall_Active = 0;
+		Wall_State = CAR_WALL_STATE_IDLE;
+		return;
+	}
+
+	WallFront = ((Ultrasonic_Front_Distance != US_INVALID_DISTANCE_CM)
+	          && (Ultrasonic_Front_Distance < CAR_WALL_FRONT_CM)) ? 1 : 0;
+	WallSideOk = ((Ultrasonic_Side_Distance != US_INVALID_DISTANCE_CM)
+	           && (Ultrasonic_Side_Distance < CAR_WALL_LOST_CM)) ? 1 : 0;
+
+	/* —— 找墙 / 丢墙找回：朝墙侧弧转，直到贴壁侧重新测到墙 —— */
+	if (Wall_State == CAR_WALL_STATE_FIND || Wall_State == CAR_WALL_STATE_REACQ)
+	{
+		if (WallSideOk)
+		{
+			if (++Wall_ConfirmCount >= CAR_WALL_FIND_CONFIRM)
+			{
+				Wall_ConfirmCount = 0;
+				Wall_TimeoutTicks = 0;
+				Wall_State = CAR_WALL_STATE_FOLLOW;
+				Wall_LastError = 0;
+				Wall_Integral = 0;
+			}
+		}
+		else
+		{
+			Wall_ConfirmCount = 0;
+			if (++Wall_TimeoutTicks >= CAR_WALL_REACQ_MAX_TICKS)
+			{
+				/* 一直找不到墙：停车，避免原地绕圈 */
+				Car_ResetWallNav();
+				Car_Stop();
+				return;
+			}
+			/* 朝墙一侧偏转的弧线前进（墙侧轮慢） */
+			if (Wall_Side == CAR_WALL_SIDE_LEFT)
+			{
+				Car_SetSignedPWM(BasePWM - 6, BasePWM + 6);
+			}
+			else
+			{
+				Car_SetSignedPWM(BasePWM + 6, BasePWM - 6);
+			}
+		}
+		return;
+	}
+
+	/* —— 前方墙：朝开口侧编码器闭环90°（贴左壁遇前墙→右转） ——
+	 * 拐角后冷却期内不判前墙，避免紧贴新墙时连续误转。 */
+	if (WallFront && (Wall_CooldownTicks == 0))
+	{
+		Car_StartPivotTurn((Wall_Side == CAR_WALL_SIDE_LEFT)
+		                 ? CAR_TURN_RIGHT : CAR_TURN_LEFT);
+		Wall_State = CAR_WALL_STATE_CORNER;
+		Wall_CooldownTicks = 0;
+		return;
+	}
+	if (Wall_CooldownTicks > 0)
+	{
+		Wall_CooldownTicks--;
+	}
+
+	/* —— 侧墙丢失：进入找回 —— */
+	if (!WallSideOk)
+	{
+		Wall_State = CAR_WALL_STATE_REACQ;
+		Wall_ConfirmCount = 0;
+		Wall_TimeoutTicks = 0;
+		Wall_LastError = 0;
+		Wall_Integral = 0;
+		return;
+	}
+
+	/* —— 贴壁 PD 主环：误差 = 目标距离 - 实测 —— */
+	Err = (int16_t)CAR_WALL_SETPOINT_CM - (int16_t)Ultrasonic_Side_Distance;
+	Wall_Integral += Err;
+	if (Wall_Integral > 300) {Wall_Integral = 300;}
+	if (Wall_Integral < -300) {Wall_Integral = -300;}
+	Deriv = Err - Wall_LastError;
+	Wall_LastError = Err;
+	PidOut = (float)Err * CAR_WALL_KP_DIST
+	       + (float)Wall_Integral * CAR_WALL_KI_DIST
+	       + (float)Deriv * CAR_WALL_KD_DIST;
+	/* 前探头近墙(未到拐角)时提前外撇，抑制车头向墙内偏 */
+	if ((Ultrasonic_Front_Distance != US_INVALID_DISTANCE_CM)
+	 && (Ultrasonic_Front_Distance < CAR_WALL_FRONT_PULL_CM))
+	{
+		PidOut += CAR_WALL_FRONT_GAIN;
+	}
+	Corr = (int16_t)PidOut;
+	if (Corr > CAR_WALL_MAX_CORR) {Corr = CAR_WALL_MAX_CORR;}
+	if (Corr < -CAR_WALL_MAX_CORR) {Corr = -CAR_WALL_MAX_CORR;}
+
+	/* 镜像差速：贴左壁离墙远(Err>0)→左慢右快向左靠墙 */
+	if (Wall_Side == CAR_WALL_SIDE_LEFT)
+	{
+		SpdL = BasePWM - Corr;
+		SpdR = BasePWM + Corr;
+	}
+	else
+	{
+		SpdL = BasePWM + Corr;
+		SpdR = BasePWM - Corr;
+	}
+	if (SpdL < CAR_WALL_MIN_PWM) {SpdL = CAR_WALL_MIN_PWM;}
+	if (SpdR < CAR_WALL_MIN_PWM) {SpdR = CAR_WALL_MIN_PWM;}
+	Car_SetSignedPWM(SpdL, SpdR);
+}
+
 static void Car_LineFollowStraight(void)
 {
 	float Steer;
@@ -1292,15 +1549,30 @@ static void OLED_ShowTrackPage(void)
 	OLED_ShowString(0, 0, "IR:", OLED_8X16);
 	OLED_ShowLineStateRToL(24, 0, OLED_8X16);
 	OLED_Printf(0, 16, OLED_8X16, "AVG:%+5ld", (long)AvgEncoderTotal);
-	OLED_Printf(0, 32, OLED_8X16, "MODE:%s", (char *)Car_RouteModeText[Route_SelectedMode]);
-	if (Route_Done)
+	if (Work_Mode == CAR_WORK_MODE_C)
 	{
-		OLED_Printf(0, 48, OLED_8X16, "SEG:DONE  %c", (Work_Mode == CAR_WORK_MODE_B) ? 'B' : 'A');
+		/* 模式C贴壁调试：MODE:WALL L/R，S=侧距 F=前距 W=状态 */
+		uint16_t WallFrontDisp = (Ultrasonic_Front_Distance == US_INVALID_DISTANCE_CM)
+		                       ? 0u : Ultrasonic_Front_Distance;
+		uint16_t WallSideDisp = (Ultrasonic_Side_Distance == US_INVALID_DISTANCE_CM)
+		                      ? 0u : Ultrasonic_Side_Distance;
+		OLED_Printf(0, 32, OLED_8X16, "MODE:WALL%c",
+		            (Wall_Side == CAR_WALL_SIDE_LEFT) ? 'L' : 'R');
+		OLED_Printf(0, 48, OLED_8X16, "S:%u F:%u W%d",
+		            (unsigned int)WallSideDisp, (unsigned int)WallFrontDisp, Wall_State);
 	}
 	else
 	{
-		OLED_Printf(0, 48, OLED_8X16, "SEG:%c-%c    %c", Step->From, Step->To,
-		            (Work_Mode == CAR_WORK_MODE_B) ? 'B' : 'A');
+		OLED_Printf(0, 32, OLED_8X16, "MODE:%s", (char *)Car_RouteModeText[Route_SelectedMode]);
+		if (Route_Done)
+		{
+			OLED_Printf(0, 48, OLED_8X16, "SEG:DONE  %c", (Work_Mode == CAR_WORK_MODE_B) ? 'B' : 'A');
+		}
+		else
+		{
+			OLED_Printf(0, 48, OLED_8X16, "SEG:%c-%c    %c", Step->From, Step->To,
+			            (Work_Mode == CAR_WORK_MODE_B) ? 'B' : 'A');
+		}
 	}
 	OLED_Update();
 }
@@ -1419,7 +1691,7 @@ int main(void)
 
 	while (1)
 	{
-		/* 固定 10ms 名义时间片；超声波已停用，循迹状态机每个循环都运行 */
+		/* 固定 10ms 名义时间片；主循环调度循迹/贴壁、按键、超声、计时 */
 		Delay_ms(CAR_LOOP_PERIOD_MS);
 
 		Car_UpdateEncoders();
@@ -1427,7 +1699,15 @@ int main(void)
 
 		if (Car_Running)
 		{
-			Car_LineFollowStraight();
+			if ((Work_Mode == CAR_WORK_MODE_C) && Wall_Active)
+			{
+				/* 模式C：贴壁；见线退出后 Wall_Active=0 → 自动走下方普通循迹 */
+				Car_WallTask();
+			}
+			else
+			{
+				Car_LineFollowStraight();
+			}
 		}
 		else
 		{

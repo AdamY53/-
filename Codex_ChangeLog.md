@@ -1,5 +1,43 @@
 # Codex Change Log
 
+## 2026-08-24 - WALL: Port Wall-Following Mode C (from aqib-m31/Wall-Following-Robot-PID)
+
+Branch: `feature/wall-follow-v1` (based on `codex/closed-loop-turn`)
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Added work mode C (wall following, K3 long-press cycles A/B/C).
+  Algorithm ported from github.com/aqib-m31/Wall-Following-Robot-PID and
+  adapted to this project:
+  - Decision priority: front wall > side wall lost > PID following.
+  - Fixed wall side (left by default; `CAR_WALL_DEFAULT_SIDE`, mirror by
+    flipping that macro); front sensor + active-side sensor are polled by
+    `Car_UltrasonicTask` in mode C.
+  - Distance PID keeps the OLED side reading at `CAR_WALL_SETPOINT_CM` (15).
+  - Front wall triggers a 90° pivot reusing the existing closed-loop
+    encoder turn (`Car_StartPivotTurn` + `Car_RunSharpTurn`), with a short
+    post-corner cooldown to avoid re-triggering on the new wall.
+  - Side wall lost enters REACQUIRE (arc toward the wall); timeout stops
+    the car instead of circling forever.
+  - New `Car_WallTask()` runs from `main()` when mode C is active.
+  - Gray sensors watched during wall following: when
+    `Gray_ActiveCount >= CAR_WALL_LINE_EXIT_MIN`, wall mode exits back to
+    normal line following.
+- OLED Track page shows `MODE:WALL L/R` and side/front distance + state in
+  mode C.
+
+Notes / known v1 limitations:
+- After a corner the car keeps the same wall side; if the wall ends up on
+  the other side it first goes through REACQUIRE (simplified behavior).
+- PID gains are starting points only: `CAR_WALL_KP_DIST/KD_DIST/KI_DIST`
+  must be tuned on the real car (KP first, KD to kill weaving).
+
+Build/verification:
+- Reviewed in agent session (UTF-8 brace/paren balance 257/257, 528/528);
+  ARMCC build to be re-run in Keil uVision before field testing.
+
 ## 2026-08-24 - H3M: T Branch Forward Entry by OLED Encoder Counts
 
 Files changed:
