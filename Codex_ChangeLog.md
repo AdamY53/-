@@ -1,5 +1,38 @@
 # Codex Change Log
 
+## 2026-08-24 - OBST: Rewrite bypass state machine to user field procedure
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Rewrote the obstacle(block) bypass to the user's exact field procedure
+  (validated with user in Q&A; reverse route D-C right-bypass example):
+  - Trigger: front servo-pan US1 (90 deg = ahead) < CAR_OBST_TRIGGER_CM(20)
+    for CAR_OBST_CONFIRM_TIMES(2) consecutive front samples (counted in
+    Car_UltrasonicTask, consumed by the line-follow monitor hook).
+  - Bypass direction by route: forward 0-3 -> turn left, keep right US3;
+    reverse 4-7 -> turn right, keep left US2; servo pre-pans the matching
+    side during the stop window.
+  - Sequence: STOP (0.5s, servo pre-pan) -> TURN1 (90 deg closed loop) ->
+    X1 drive until front US1 has no echo -> X2 fixed drive of
+    CAR_OBST_ENC_FIXED(400) encoders (OLED AVG units) -> TURN2 (back to
+    heading) -> WAIT -> WALL drive while side US goes 0->value->0 (second
+    zero stops, then WAIT) -> TURN3 -> WAIT -> FIND (snake until gray
+    >= CAR_OBST_LINE_MIN) -> WAIT -> TURN4 (return to track heading) ->
+    servo back to front, hand control back to line following.
+  - All "settle" pauses share one CAR_OBST_STOP_TICKS window for tuning.
+  - No distance PID in the wall segment (pure drive + zero-edge detect);
+    direction/servo angles are the main field-calibration knobs
+    (CAR_OBST_SERVO_RIGHT/LEFT).
+- Removed old HUG/PD REJOIN variant and its macros/variables entirely.
+
+Build/verification:
+- Reviewed in agent session (UTF-8 paren/brace 598/598, 284/284; old
+  symbol scan clean); ARMCC build to be re-run in Keil uVision.
+
 ## 2026-08-24 - OBST: Inline obstacle(block) bypass while line tracking
 
 Branch: `feature/wall-follow-v1`
