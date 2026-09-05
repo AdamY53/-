@@ -1,5 +1,31 @@
 # Codex Change Log
 
+## 2026-08-24 - WALL: Remove Wall-Following Mode C (prototype rejected on real car)
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Completely removed the wall-following mode C prototype (it could not run
+  on the real car):
+  - Deleted `CAR_WORK_MODE_C`, all `CAR_WALL_*` parameter/state macros,
+    the `Wall_*` state variables, `Car_StartPivotTurn()`,
+    `Car_ResetWallNav()` and `Car_WallTask()`.
+  - `Car_ToggleWorkMode()` back to A/B cycling; `main()` loop and
+    `Car_UltrasonicTask()` restored to pre-C logic; OLED Track page back to
+    route-mode display.
+- Kept the user's base tuning committed separately in `270589c`
+  (CAR_BASE_PWM 31, MIN_FORWARD_PWM 15, MODE_B_LINE_ACTIVE_MIN 3,
+  OBJECT_MIN/MAX_CM 23/35) untouched.
+- Code state now equals the `codex/closed-loop-turn` logic plus those user
+  tuning values only.
+
+Build/verification:
+- No CAR_WALL/CAR_WORK_MODE_C symbols remain; UTF-8 paren/brace balance
+  439/439, 224/224; ARMCC build to be re-run in Keil uVision.
+
 ## 2026-08-24 - WALL: Port Wall-Following Mode C (from aqib-m31/Wall-Following-Robot-PID)
 
 Branch: `feature/wall-follow-v1` (based on `codex/closed-loop-turn`)
