@@ -8,13 +8,13 @@
 #include "Ultrasonic.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               32.0f
+#define CAR_BASE_PWM               31.0f
 #define CAR_LINE_KP                0.084f
 #define CAR_LINE_KD                0.064f
 #define CAR_ENCODER_BALANCE_KP     0.350f
 #define CAR_STEER_LIMIT            25.0f
 #define CAR_BALANCE_LIMIT          5.0f
-#define CAR_MIN_FORWARD_PWM        16.0f
+#define CAR_MIN_FORWARD_PWM        15.0f
 #define CAR_PWM_LIMIT              60.0f
 
 /* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 10ms，数值越大越不容易误触发。 */
@@ -59,15 +59,15 @@
 /* 可调窗口：模式B中到 Q/O 点后的停稳时间，每个周期约 10ms，50=约0.5秒。 */
 #define CAR_MODE_B_STOP_TICKS        50
 /* 可调窗口：模式B中，无黑线直行后看到多少路灰度为高电平才认为重新遇到黑线。 */
-#define CAR_MODE_B_LINE_ACTIVE_MIN   5
+#define CAR_MODE_B_LINE_ACTIVE_MIN   3
 /* 可调窗口：模式B重新回到黑线后，后面第几个 T 路口才算 A-D/D-A 路段结束。 */
 #define CAR_MODE_B_REJOIN_T_COUNT    3
 
 /* 可调窗口：超声波采样间隔，每个周期约10ms；前方和当前外侧模块轮流采样。 */
 #define CAR_ULTRASONIC_SAMPLE_TICKS  10
 /* 可调窗口：外围物块认定范围，单位厘米。 */
-#define CAR_OBJECT_MIN_CM            20
-#define CAR_OBJECT_MAX_CM            40
+#define CAR_OBJECT_MIN_CM            23
+#define CAR_OBJECT_MAX_CM            35
 /* 可调窗口：物块离开范围的释放阈值，留出滞回避免边界抖动重复计数。 */
 #define CAR_OBJECT_RELEASE_CM        45
 /* 可调窗口：连续多少次进入20~40cm才计为发现一个物块。 */
