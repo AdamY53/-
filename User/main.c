@@ -6,6 +6,7 @@
 #include "Encoder.h"
 #include "Grayscale.h"
 #include "Ultrasonic.h"
+#include "Servo.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
 #define CAR_BASE_PWM               31.0f
@@ -76,6 +77,43 @@
 #define CAR_OBJECT_RELEASE_SAMPLES   3
 /* 可调窗口：最多显示/统计题目要求的3个外围物块。 */
 #define CAR_OBJECT_MAX_COUNT         3
+
+/* ===== 循迹途中障碍(木块)绕行参数 =====
+ * 触发：车头舵机云台超声(US1，90°=正前) < CAR_OBST_TRIGGER_CM 连续确认后
+ * 绕行：停车时舵机预转90°→第1次90°转(绕向)→直行横移(US1仍指向木块，
+ *       直到读数>脱离阈值)→第2次90°(反向回正)同时舵机回正前→贴壁PD直行
+ *       (用对应固定侧超声保持距离)→第3次90°(同第2次)→第4次90°(同第1次)
+ *       →灰度见线交还循迹。绕向按路线方向：正向0-3左绕用右超声(US3)；
+ *       反向4-7右绕用左超声(US2)。 */
+#define CAR_OBST_TRIGGER_CM          25   /* 前端触发绕行阈值(cm) */
+#define CAR_OBST_CONFIRM_TICKS       8    /* 触发保持确认帧数(约80ms，覆盖一个超声周期) */
+#define CAR_OBST_STOP_TICKS          20   /* 停车+舵机预转时间(约200ms) */
+#define CAR_OBST_SIDE_GONE_CM        35   /* 横移段：US1大于此值=已脱离木块正对范围 */
+#define CAR_OBST_HOLD_CM             15   /* 贴壁段：固定侧超声目标距离(cm) */
+#define CAR_OBST_HOLD_TOL_CM         3    /* 贴壁段允许误差区间(±)，读数落在区间内直行 */
+#define CAR_OBST_PD_P                0.6f /* 贴壁段距离环P(误差cm→差速) */
+#define CAR_OBST_PD_D                2.0f /* 贴壁段距离环D */
+#define CAR_OBST_MAX_CORR            9    /* 贴壁段单帧最大差速修正 */
+#define CAR_OBST_ARC_PWM             22   /* 横移/贴壁段前进PWM */
+#define CAR_OBST_SLOW_PWM            26   /* 找线段前进PWM */
+#define CAR_OBST_FRONT_CM            10   /* 直行段前方防撞阈值(过近强制停车等待) */
+#define CAR_OBST_HUG_MAX_TICKS       150  /* 横移段超时(约1.5s) */
+#define CAR_OBST_WALL_MAX_TICKS      300  /* 贴壁段超时(约3s) */
+#define CAR_OBST_REJOIN_MAX_TICKS    250  /* 回线找线超时(约2.5s) */
+#define CAR_OBST_LINE_MIN            3    /* 灰度≥几路亮=重新见线 */
+#define CAR_OBST_SERVO_FRONT         90   /* 舵机角度=正前(用户确认90°朝前) */
+#define CAR_OBST_SERVO_RIGHT         180  /* 舵机角度=朝右(实测标定后调整) */
+#define CAR_OBST_SERVO_LEFT          0    /* 舵机角度=朝左(实测标定后调整) */
+
+/* 绕障子状态机 */
+#define CAR_OBST_STATE_IDLE          0    /* 未在绕障 */
+#define CAR_OBST_STATE_ARM           1    /* 前端<阈值持续确认(每帧检测) */
+#define CAR_OBST_STATE_STOP          2    /* 停车+舵机预转(等待舵机到位) */
+#define CAR_OBST_STATE_TURN          3    /* 正在执行一次90°闭环转弯(按序列号) */
+#define CAR_OBST_STATE_HUG           4    /* 直行横移：车头沿绕向，US1盯木块直到脱离 */
+#define CAR_OBST_STATE_WALL          5    /* 贴壁PD直行：固定侧超声保持距离 */
+#define CAR_OBST_STATE_REJOIN        6    /* 找线直行：直到灰度见线交还循迹 */
+#define CAR_OBST_STATE_ABORT         7    /* 超时保护停车 */
 
 #define CAR_LINE_STATE_FOLLOW      0
 #define CAR_LINE_STATE_APPROACH    1
@@ -184,6 +222,18 @@ static uint8_t Object_Count = 0;
 static uint8_t Object_Enter_Count = 0;
 static uint8_t Object_Release_Count = 0;
 static uint8_t Object_Latched = 0;
+
+/* 循迹途中障碍(木块)绕行状态 */
+static uint8_t Obst_State = CAR_OBST_STATE_IDLE;
+static uint8_t Obst_ConfirmCount = 0;   /* 触发确认帧计数 */
+static uint8_t Obst_TurnSeq = 0;        /* 90°序列号 1..4（决定每步方向） */
+static uint8_t Obst_TurnDir = CAR_TURN_LEFT;   /* 本次绕行第1次转弯方向 */
+static UltrasonicChannel_t Obst_SideChan = US_CH_RIGHT; /* 贴壁段用哪侧固定超声 */
+static uint8_t Obst_Tick = 0;           /* 段内计时 */
+static int16_t Obst_PidLastError = 0;
+static int32_t Obst_WallPidInt = 0;
+static int32_t Obst_EntryLeftTotal = 0; /* 直行段起点左编码器 */
+static int32_t Obst_EntryRightTotal = 0;
 
 static uint32_t Car_Time_LastCycle = 0;
 static uint8_t Car_Time_Ready = 0;
@@ -412,7 +462,9 @@ static void Car_UltrasonicTask(void)
 		return;
 	}
 	Ultrasonic_Sample_Tick = 0;
-	Ultrasonic_ActiveSide = Car_GetActiveUltrasonicSide();
+	/* 绕障期间贴壁侧固定用 Obst_SideChan；平时按当前路线选择外侧。 */
+	Ultrasonic_ActiveSide = (Obst_State != CAR_OBST_STATE_IDLE)
+	                      ? Obst_SideChan : Car_GetActiveUltrasonicSide();
 
 	/* 前方和当前外侧模块轮流测量，避免三个 HC-SR04 同时发声串扰。 */
 	if (Ultrasonic_NextChannel == 0u)
@@ -1186,6 +1238,322 @@ static void Car_RunSharpTurn(void)
 }
 
 
+/* ================= 循迹途中障碍(木块)绕行 =================
+ * 触发：车头云台超声(US1，90°=正前) < CAR_OBST_TRIGGER_CM 持续确认。
+ * 绕向：正向路线(0-3)=左绕/用右超声；反向路线(4-7)=右绕/用左超声。
+ * 动作：停(舵机预转)→①绕向90°→直行横移(US1脱离木块)→②反向90°(云台回正)
+ *      →贴壁PD直行(固定侧超声保距)→③同②方向90°→蛇行找线→灰度见线交还循迹；
+ *      找线超时→④同①方向90°再找线，再超时停车。
+ * 说明：各段方向/角度若实车反了，优先改 CAR_OBST_SERVO_RIGHT/LEFT 与
+ *      Obst_TurnDir 的路线判定，不用改逻辑。 */
+static uint8_t Obst_OppDir(uint8_t Dir)
+{
+	return (Dir == CAR_TURN_LEFT) ? CAR_TURN_RIGHT : CAR_TURN_LEFT;
+}
+
+/* 纯原地闭环90°：跳过 APPROACH 直行，从当前编码器位置直接转 */
+static void Obst_StartPivot(uint8_t Direction)
+{
+	Car_ClearLinePD();
+	Line_State = CAR_LINE_STATE_FIXED_TURN;
+	Turn_Direction = Direction;
+	Turn_Tick = 0;
+	Turn_Cooldown_Tick = 0;
+	Sharp_Left_Count = 0;
+	Sharp_Right_Count = 0;
+	Turn_Entry_Left_Total = Encoder_Left_Total;
+	Turn_Entry_Right_Total = Encoder_Right_Total;
+	Turn_Forward_Count = 0;
+	Turn_Left_Encoder_Count = 0;
+	Turn_Right_Encoder_Count = 0;
+	Turn_Left_Encoder_Reached = 0;
+	Turn_Right_Encoder_Reached = 0;
+	Car_LoadTurnEncoderTargets(Direction);
+	Route_TurnEndsSegment = 0;
+}
+
+static void Obst_ResetNav(void)
+{
+	Obst_State = CAR_OBST_STATE_IDLE;
+	Obst_ConfirmCount = 0;
+	Obst_Tick = 0;
+	Obst_PidLastError = 0;
+	Obst_WallPidInt = 0;
+}
+
+/* 触发绕行：按当前路线方向定绕向与贴壁侧，停车并让舵机预转 */
+static void Obst_BeginBlock(void)
+{
+	Obst_ConfirmCount = 0;
+	Obst_Tick = 0;
+	Obst_TurnSeq = 1;
+	Obst_PidLastError = 0;
+	Obst_WallPidInt = 0;
+	Obst_EntryLeftTotal = Encoder_Left_Total;
+	Obst_EntryRightTotal = Encoder_Right_Total;
+
+	if (Route_SelectedMode >= CAR_ROUTE_MODE_COUNT / 2)
+	{
+		/* 反向路线：右绕，贴壁用左超声，舵机预转向左 */
+		Obst_TurnDir = CAR_TURN_RIGHT;
+		Obst_SideChan = US_CH_LEFT;
+		Servo_SetAngle(CAR_OBST_SERVO_LEFT);
+	}
+	else
+	{
+		/* 正向路线：左绕，贴壁用右超声，舵机预转向右 */
+		Obst_TurnDir = CAR_TURN_LEFT;
+		Obst_SideChan = US_CH_RIGHT;
+		Servo_SetAngle(CAR_OBST_SERVO_RIGHT);
+	}
+	Obst_State = CAR_OBST_STATE_STOP;
+	Car_ResetLineController();
+	Car_Stop();
+}
+
+static uint8_t Obst_LineSeen(void)
+{
+	return (Gray_ActiveCount >= CAR_OBST_LINE_MIN) ? 1 : 0;
+}
+
+/* 车头云台超声(横移段=仍指向木块方向)是否已脱离木块 */
+static uint8_t Obst_FrontGone(void)
+{
+	return ((Ultrasonic_Front_Distance == US_INVALID_DISTANCE_CM)
+	     || (Ultrasonic_Front_Distance > CAR_OBST_SIDE_GONE_CM)) ? 1 : 0;
+}
+
+/* 贴壁段前方过近(绕错方向/压太近)，需要停车保护 */
+static uint8_t Obst_FrontTooNear(void)
+{
+	return ((Ultrasonic_Front_Distance != US_INVALID_DISTANCE_CM)
+	     && (Ultrasonic_Front_Distance < CAR_OBST_FRONT_CM)) ? 1 : 0;
+}
+
+/* 贴壁侧距离：无效或已超过脱离阈值=木块侧面走完 */
+static uint8_t Obst_SideGone(void)
+{
+	return ((Ultrasonic_Side_Distance == US_INVALID_DISTANCE_CM)
+	     || (Ultrasonic_Side_Distance > CAR_OBST_SIDE_GONE_CM)) ? 1 : 0;
+}
+
+static void Car_RunObstNav(void)
+{
+	int16_t Err;
+	int16_t Deriv;
+	float Pid;
+	int16_t Corr;
+	int16_t SpdL;
+	int16_t SpdR;
+
+	if (Obst_State == CAR_OBST_STATE_IDLE)
+	{
+		return;
+	}
+
+	if (Obst_State == CAR_OBST_STATE_ABORT)
+	{
+		Car_Stop();
+		return;
+	}
+
+	/* —— 正在执行一次90°闭环转弯：推进直到转完再分发 —— */
+	if (Obst_State == CAR_OBST_STATE_TURN)
+	{
+		if (Line_State != CAR_LINE_STATE_FOLLOW)
+		{
+			Car_RunSharpTurn();
+			return;
+		}
+		if (Obst_TurnSeq == 1u)
+		{
+			Obst_TurnSeq = 2u;
+			Obst_State = CAR_OBST_STATE_HUG;
+			Obst_Tick = 0;
+			Obst_EntryLeftTotal = Encoder_Left_Total;
+			Obst_EntryRightTotal = Encoder_Right_Total;
+		}
+		else if (Obst_TurnSeq == 2u)
+		{
+			Obst_TurnSeq = 3u;
+			Obst_State = CAR_OBST_STATE_WALL;
+			Obst_Tick = 0;
+			Obst_PidLastError = 0;
+			Obst_WallPidInt = 0;
+			Servo_SetAngle(CAR_OBST_SERVO_FRONT);   /* 云台回正前 */
+		}
+		else
+		{
+			/* seq 3/4 转完：去找线 */
+			Obst_State = CAR_OBST_STATE_REJOIN;
+			Obst_Tick = 0;
+			Obst_EntryLeftTotal = Encoder_Left_Total;
+			Obst_EntryRightTotal = Encoder_Right_Total;
+		}
+		return;
+	}
+
+	/* —— 直行横移：沿绕向慢速直行，直到车头云台超声脱离木块 —— */
+	if (Obst_State == CAR_OBST_STATE_HUG)
+	{
+		Grayscale_Tick();
+		Obst_Tick++;
+		if (Obst_FrontTooNear())
+		{
+			Obst_State = CAR_OBST_STATE_ABORT;   /* 越走越近=绕错方向，停车保护 */
+			Car_Stop();
+			return;
+		}
+		if (Obst_FrontGone())
+		{
+			Obst_StartPivot(Obst_OppDir(Obst_TurnDir));   /* 第2次转：回正前进方向 */
+			Obst_State = CAR_OBST_STATE_TURN;
+			return;
+		}
+		if (Obst_Tick >= CAR_OBST_HUG_MAX_TICKS)
+		{
+			Obst_State = CAR_OBST_STATE_ABORT;
+			Car_Stop();
+			return;
+		}
+		Car_SetSignedPWM(CAR_OBST_ARC_PWM, CAR_OBST_ARC_PWM);
+		return;
+	}
+
+	/* —— 贴壁PD直行：固定侧超声保持 CAR_OBST_HOLD_CM —— */
+	if (Obst_State == CAR_OBST_STATE_WALL)
+	{
+		Grayscale_Tick();
+		if (Obst_LineSeen())
+		{
+			Obst_ResetNav();   /* 已见线，直接交还循迹 */
+			return;
+		}
+		Obst_Tick++;
+		if (Obst_SideGone())
+		{
+			Obst_StartPivot(Obst_OppDir(Obst_TurnDir));   /* 第3次转：转向线方向 */
+			Obst_State = CAR_OBST_STATE_TURN;
+			return;
+		}
+		if (Obst_Tick >= CAR_OBST_WALL_MAX_TICKS)
+		{
+			Obst_State = CAR_OBST_STATE_ABORT;
+			Car_Stop();
+			return;
+		}
+
+		Err = (int16_t)CAR_OBST_HOLD_CM - (int16_t)Ultrasonic_Side_Distance;
+		Deriv = Err - Obst_PidLastError;
+		Obst_PidLastError = Err;
+		Pid = (float)Err * CAR_OBST_PD_P + (float)Deriv * CAR_OBST_PD_D;
+		Corr = (int16_t)Pid;
+		if (Corr > CAR_OBST_MAX_CORR) {Corr = CAR_OBST_MAX_CORR;}
+		if (Corr < -CAR_OBST_MAX_CORR) {Corr = -CAR_OBST_MAX_CORR;}
+
+		if (Obst_SideChan == US_CH_RIGHT)
+		{
+			/* 木块在右：偏远(Corr>0)→右轮慢左轮快靠右 */
+			SpdL = CAR_OBST_ARC_PWM + Corr;
+			SpdR = CAR_OBST_ARC_PWM - Corr;
+		}
+		else
+		{
+			SpdL = CAR_OBST_ARC_PWM - Corr;
+			SpdR = CAR_OBST_ARC_PWM + Corr;
+		}
+		if (SpdL < 0) {SpdL = 0;}
+		if (SpdR < 0) {SpdR = 0;}
+		Car_SetSignedPWM(SpdL, SpdR);
+		return;
+	}
+
+	/* —— 找线：小幅蛇行前进，灰度见线即交还循迹 —— */
+	if (Obst_State == CAR_OBST_STATE_REJOIN)
+	{
+		Grayscale_Tick();
+		Obst_Tick++;
+		if (Obst_LineSeen())
+		{
+			Obst_ResetNav();
+			return;
+		}
+		if (Obst_Tick >= CAR_OBST_REJOIN_MAX_TICKS)
+		{
+			if (Obst_TurnSeq < 4u)
+			{
+				/* 第4次转：同第1次方向，兜底回正后再找 */
+				Obst_TurnSeq = 4u;
+				Obst_Tick = 0;
+				Obst_StartPivot(Obst_TurnDir);
+				Obst_State = CAR_OBST_STATE_TURN;
+				return;
+			}
+			Obst_State = CAR_OBST_STATE_ABORT;
+			Car_Stop();
+			return;
+		}
+		if ((Obst_Tick / 20u) & 1u)
+		{
+			Car_SetSignedPWM(CAR_OBST_SLOW_PWM - 5, CAR_OBST_SLOW_PWM);
+		}
+		else
+		{
+			Car_SetSignedPWM(CAR_OBST_SLOW_PWM, CAR_OBST_SLOW_PWM - 5);
+		}
+		return;
+	}
+
+	/* —— STOP：停车让舵机完成预转 —— */
+	Obst_Tick++;
+	if (Obst_Tick >= CAR_OBST_STOP_TICKS)
+	{
+		Obst_StartPivot(Obst_TurnDir);   /* 第1次转：绕向90° */
+		Obst_State = CAR_OBST_STATE_TURN;
+	}
+	else
+	{
+		Car_Stop();
+	}
+}
+
+/* 循迹每帧检测前方木块；一旦进入绕障接管循迹，返回1表示本帧已被占用 */
+static uint8_t Car_ObstMonitor(void)
+{
+	if (Obst_State == CAR_OBST_STATE_IDLE)
+	{
+		/* 只在模式A地图循迹、正常压线(非转弯/冷却)时检测前端木块 */
+		if ((Work_Mode != CAR_WORK_MODE_A)
+		 || !Car_Running
+		 || !Route_Active
+		 || Route_Done
+		 || (Line_State != CAR_LINE_STATE_FOLLOW)
+		 || (Turn_Cooldown_Tick > 0))
+		{
+			Obst_ConfirmCount = 0;
+			return 0;
+		}
+		if ((Ultrasonic_Front_Distance != US_INVALID_DISTANCE_CM)
+		 && (Ultrasonic_Front_Distance < CAR_OBST_TRIGGER_CM))
+		{
+			if (++Obst_ConfirmCount >= CAR_OBST_CONFIRM_TICKS)
+			{
+				Obst_BeginBlock();
+			}
+		}
+		else
+		{
+			Obst_ConfirmCount = 0;
+		}
+		if (Obst_State == CAR_OBST_STATE_IDLE)
+		{
+			return 0;
+		}
+	}
+	Car_RunObstNav();
+	return 1;
+}
+
 static void Car_LineFollowStraight(void)
 {
 	float Steer;
@@ -1199,6 +1567,12 @@ static void Car_LineFollowStraight(void)
 	if (Car_IsModeBNavBusy())
 	{
 		Car_RunModeBNav();
+		return;
+	}
+
+	/* 前方木块检测与绕障接管（绕障忙时本帧循迹让位） */
+	if (Car_ObstMonitor())
+	{
 		return;
 	}
 
@@ -1298,6 +1672,20 @@ static void OLED_ShowTrackPage(void)
 	OLED_ShowString(0, 0, "IR:", OLED_8X16);
 	OLED_ShowLineStateRToL(24, 0, OLED_8X16);
 	OLED_Printf(0, 16, OLED_8X16, "AVG:%+5ld", (long)AvgEncoderTotal);
+	if (Obst_State != CAR_OBST_STATE_IDLE)
+	{
+		/* 绕障调试：MODE 行显示 OBSx，x=状态号(2停/3转/4横移/5贴壁/6找线/7异常) */
+		uint16_t ObstFrontDisp = (Ultrasonic_Front_Distance == US_INVALID_DISTANCE_CM)
+		                       ? 0u : Ultrasonic_Front_Distance;
+		uint16_t ObstSideDisp = (Ultrasonic_Side_Distance == US_INVALID_DISTANCE_CM)
+		                      ? 0u : Ultrasonic_Side_Distance;
+		OLED_Printf(0, 32, OLED_8X16, "OBS%d %c", Obst_State,
+		            (Obst_SideChan == US_CH_RIGHT) ? 'R' : 'L');
+		OLED_Printf(0, 48, OLED_8X16, "F:%u S:%u", (unsigned int)ObstFrontDisp,
+		            (unsigned int)ObstSideDisp);
+	}
+	else
+	{
 	OLED_Printf(0, 32, OLED_8X16, "MODE:%s", (char *)Car_RouteModeText[Route_SelectedMode]);
 	if (Route_Done)
 	{
@@ -1307,6 +1695,7 @@ static void OLED_ShowTrackPage(void)
 	{
 		OLED_Printf(0, 48, OLED_8X16, "SEG:%c-%c    %c", Step->From, Step->To,
 		            (Work_Mode == CAR_WORK_MODE_B) ? 'B' : 'A');
+	}
 	}
 	OLED_Update();
 }
@@ -1381,6 +1770,8 @@ static void Key_Task(void)
 	if (KeyNum == KEY_NUM_K1)
 	{
 		Car_Running = !Car_Running;
+		Obst_ResetNav();
+		Servo_SetAngle(CAR_OBST_SERVO_FRONT);   /* 云台始终复位到正前 */
 		Car_ResetLineController();
 		if (Car_Running)
 		{
@@ -1413,6 +1804,8 @@ int main(void)
 	Encoder_Init();
 	Grayscale_Init();
 	Ultrasonic_Init();
+	Servo_Init();
+	Servo_SetAngle(CAR_OBST_SERVO_FRONT);   /* 车头云台超声默认朝正前，用于循迹中检测木块 */
 	Car_TimeInit();
 	Car_ResetUltrasonicDetection();
 	Car_Stop();

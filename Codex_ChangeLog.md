@@ -1,5 +1,39 @@
 # Codex Change Log
 
+## 2026-08-24 - OBST: Inline obstacle(block) bypass while line tracking
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Line tracking now auto-detects a 20x20cm block on the line (front servo
+  pan ultrasonic US1, 90 degrees = straight ahead) and bypasses it, then
+  returns to the track. Detection is hooked inside `Car_LineFollowStraight`
+  (like Mode B) so tracking yields as soon as the front distance drops:
+  - Trigger: US1 < CAR_OBST_TRIGGER_CM(25) held
+    CAR_OBST_CONFIRM_TICKS(8) frames while mode A running on line.
+  - Bypass direction by route: forward routes (mode 0-3) turn left and use
+    right ultrasonic (US3); reverse routes (4-7) turn right and use left
+    ultrasonic (US2).
+  - Sequence: stop while servo pre-pans to the side -> 1st 90 deg pivot
+    (closed-loop encoder) -> drive sideways until US1 leaves the block ->
+    2nd opposite 90 deg + servo back to front -> wall-follow PD keeping the
+    side ultrasonic at CAR_OBST_HOLD_CM(15) -> 3rd 90 deg -> snake to find
+    the line (gray >= CAR_OBST_LINE_MIN) -> hand back to line following;
+    if not found, a 4th 90 deg tries again, then timeout stop.
+  - Car_UltrasonicTask uses Obst_SideChan while bypassing; OLED Track page
+    shows OBS<state> + side/front distances during bypass; K1 resets bypass
+    and returns servo to front.
+- New servo init at boot (Servo_Init + front angle).
+- Tuning knobs all in CAR_OBST_* macros; servo side angles
+  CAR_OBST_SERVO_RIGHT/LEFT(180/0) need field calibration.
+
+Build/verification:
+- Reviewed in agent session (UTF-8 paren/brace balance 593/593, 274/274);
+  ARMCC build to be re-run in Keil uVision before field testing.
+
 ## 2026-08-24 - WALL: Remove Wall-Following Mode C (prototype rejected on real car)
 
 Branch: `feature/wall-follow-v1`
