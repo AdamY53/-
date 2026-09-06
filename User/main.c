@@ -16,9 +16,11 @@
 #define CAR_STEER_LIMIT            25.0f
 #define CAR_BALANCE_LIMIT          5.0f
 /* 直行修正参数：
- * CAR_STRAIGHT_PWM_TRIM —— 静态补正(0=关)。左右轮机械/电机不一致时，
- * 车会固定偏向一侧：车总向右偏 → 填 +4~+8；总向左偏 → 填负值。
- * 作用：左轮+TRIM、右轮-TRIM（即给偏慢的一侧提速）。
+ * CAR_STRAIGHT_PWM_TRIM —— 静态补正(0=关)。左右轮机械/电机不一致时车会
+ * 固定偏向一侧。公式：左轮 +TRIM、右轮 -TRIM（正→车向右回正、负→向左）。
+ * 因此：车总向右偏 → 填负值；车总向左偏 → 填正值。从 ±2 起步，每次约 ×2，
+ * 能基本直行 1~2m 即停；切勿一次给几十(会把一轮减没/一轮加爆成原地转)。
+ * 该值同时作用于：绕障直行段、模式B离线段、循迹直线输出。
  * CAR_STRAIGHT_BALANCE_KP —— 直行段(绕障/无黑线直行)编码器差速平衡增益；
  * 循迹段仍用上方 CAR_ENCODER_BALANCE_KP。若直行仍画S/偏，可整体调大。 */
 #define CAR_STRAIGHT_PWM_TRIM      0
@@ -80,7 +82,7 @@
 /* 可调窗口：物块离开范围的释放阈值，留出滞回避免边界抖动重复计数。 */
 #define CAR_OBJECT_RELEASE_CM        45
 /* 可调窗口：连续多少次进入20~40cm才计为发现一个物块。 */
-#define CAR_OBJECT_CONFIRM_SAMPLES   3
+#define CAR_OBJECT_CONFIRM_SAMPLES   1
 /* 可调窗口：连续多少次离开释放范围才允许下一物块重新计数。 */
 #define CAR_OBJECT_RELEASE_SAMPLES   3
 /* 可调窗口：最多显示/统计题目要求的3个外围物块。 */
@@ -1680,8 +1682,9 @@ static void Car_LineFollowStraight(void)
 
 	Line_Steer_PWM = (int8_t)Steer;
 	Encoder_Balance_PWM = (int8_t)Balance;
-	LeftPWM = CAR_BASE_PWM + Steer - Balance;
-	RightPWM = CAR_BASE_PWM - Steer + Balance;
+	/* 叠加静态直行补正（与直行段同一语义：左+TRIM/右-TRIM） */
+	LeftPWM = CAR_BASE_PWM + Steer - Balance + CAR_STRAIGHT_PWM_TRIM;
+	RightPWM = CAR_BASE_PWM - Steer + Balance - CAR_STRAIGHT_PWM_TRIM;
 	Car_SetForwardPWM(LeftPWM, RightPWM);
 }
 

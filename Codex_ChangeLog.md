@@ -1,5 +1,29 @@
 # Codex Change Log
 
+## 2026-08-24 - DRIVE: TRIM default 0, direction note fixed, applied to line follow
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Reset `CAR_STRAIGHT_PWM_TRIM` back to 0 (user trial -88 stalled one wheel
+  because the trim is a small static bias: +/-2..8 per step, never tens).
+- Corrected the trim direction note: trim positive adds to the left wheel
+  and subtracts from the right, which steers right; so fill a negative
+  value if the car drifts right, positive if it drifts left.
+- Trim now also applies to the line-following straight output (same
+  left+TRIM/right-TRIM) in `Car_LineFollowStraight`, so the same static
+  correction works during line tracking too.
+- Restored garbled comment text on `CAR_OBJECT_CONFIRM_SAMPLES` (pasted
+  chat text removed); value stays 1 as the user set (if blocks miscount,
+  raise back to 3).
+
+Build/verification:
+- Reviewed (UTF-8 paren/brace 612/612, 287/287); ARMCC build to be
+  re-run in Keil.
+
 ## 2026-08-24 - DRIVE: unified straight-drive balance (fixes drifting car)
 
 Branch: `feature/wall-follow-v1`
