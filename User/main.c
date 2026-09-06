@@ -1085,12 +1085,16 @@ static uint32_t Ins_GetValue(const CAR_ROUTE_STEP *S, uint8_t Idx)
 
 /* 保险触发时该窗口应转方向：顺普通左(逆时针)、逆普通右；AD 与 DA 互补表。
  * 若实车保险转反，翻 AD/DA 两表对应项即可(镜像)。 */
+/* 方向表：按"到达点固定转向"定义(顺时针整圈 A→B→C→D→a→b→c→d→A)：
+ * 到B左/到C左/到D左/到a左/到b右/到c右/到d左/到A左。
+ * 顺普通 AB/BC/CD=左；逆普通 BA/CB/DC=右；
+ * D-A(顺序 a,b,c,d) = 左,右,右,左,左；A-D(倒序 d,c,b,a)=镜像 右,左,左,右,右。 */
 static uint8_t Ins_GetDir(const CAR_ROUTE_STEP *S, uint8_t Idx)
 {
-	static const uint8_t InsAdDir[5] = {CAR_TURN_LEFT, CAR_TURN_RIGHT, CAR_TURN_RIGHT,
-	                                    CAR_TURN_LEFT, CAR_TURN_LEFT};
-	static const uint8_t InsDaDir[5] = {CAR_TURN_RIGHT, CAR_TURN_LEFT, CAR_TURN_LEFT,
+	static const uint8_t InsAdDir[5] = {CAR_TURN_RIGHT, CAR_TURN_LEFT, CAR_TURN_LEFT,
 	                                    CAR_TURN_RIGHT, CAR_TURN_RIGHT};
+	static const uint8_t InsDaDir[5] = {CAR_TURN_LEFT, CAR_TURN_RIGHT, CAR_TURN_RIGHT,
+	                                    CAR_TURN_LEFT, CAR_TURN_LEFT};
 
 	if (Ins_IsFwdNormalStep(S)) {return CAR_TURN_LEFT;}
 	if (((S->From == 'B') && (S->To == 'A')) ||
