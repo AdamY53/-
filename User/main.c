@@ -155,6 +155,7 @@
 
 #define CAR_DISPLAY_PAGE_TRACK      0
 #define CAR_DISPLAY_PAGE_ROUTE      1
+#define CAR_DISPLAY_PAGE_INSURANCE  2   /* 漏转保险调试页(K2 循环切到) */
 
 #define CAR_WORK_MODE_A             0
 #define CAR_WORK_MODE_B             1
@@ -2020,11 +2021,46 @@ static void OLED_ShowRoutePage(void)
 	OLED_Update();
 }
 
+/* 保险调试页：S=当前段From-To #窗口序号+方向；
+ * U=本窗口已累计AVG(自上次固定动作完成)；V=窗口保险值；L=还差多少触发(<=0=会触发) */
+static void OLED_ShowInsurancePage(void)
+{
+	const CAR_ROUTE_STEP *Step;
+	uint8_t Idx;
+	uint32_t Value;
+	uint8_t Dir;
+	int32_t Used;
+
+	OLED_Clear();
+	if (!Route_Active || Route_Done
+	 || (Route_CurrentSegment >= CAR_ROUTE_SEGMENT_COUNT))
+	{
+		OLED_ShowString(0, 16, "INSUR OFF", OLED_8X16);
+		OLED_Update();
+		return;
+	}
+	Step = &Car_RouteMap[Route_SelectedMode][Route_CurrentSegment];
+	Idx = Route_SegmentTurnCount;
+	Value = Ins_GetValue(Step, Idx);
+	Dir = Ins_GetDir(Step, Idx);
+	Used = Ins_GetAvgNow() - Ins_BaseAvg;
+	OLED_Printf(0, 0, OLED_8X16, "%c-%c#%d %c", Step->From, Step->To, Idx,
+	            (Dir == CAR_TURN_LEFT) ? 'L' : 'R');
+	OLED_Printf(0, 16, OLED_8X16, "U:%+5ld", (long)Used);
+	OLED_Printf(0, 32, OLED_8X16, "V:%5lu", (unsigned long)Value);
+	OLED_Printf(0, 48, OLED_8X16, "L:%5ld", (long)((int32_t)Value - Used));
+	OLED_Update();
+}
+
 static void OLED_Task(void)
 {
 	if (OLED_Page == CAR_DISPLAY_PAGE_ROUTE)
 	{
 		OLED_ShowRoutePage();
+	}
+	else if (OLED_Page == CAR_DISPLAY_PAGE_INSURANCE)
+	{
+		OLED_ShowInsurancePage();
 	}
 	else
 	{
@@ -2065,7 +2101,8 @@ static void Key_Task(void)
 	}
 	else if (KeyNum == KEY_NUM_K2)
 	{
-		OLED_Page ^= 1u;
+		/* 三页循环：Track(循迹) → Route(计时) → INS(保险调试) */
+		OLED_Page = (uint8_t)((OLED_Page + 1u) % 3u);
 	}
 	else if ((KeyNum == KEY_NUM_K3) && !Car_Running)
 	{
