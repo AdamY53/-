@@ -63,6 +63,17 @@
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，每个周期约 10ms，屏蔽期内不再次触发 90 度转弯。 */
 #define CAR_TURN_COOLDOWN_TICKS      24
 
+/* ===== 路程漏转保险（A/B 模式）=====
+ * 目的：灰度漏检某个 90° 路口时，按路程 AVG 兜底强制做动作，防止冲线。
+ * 计量：AVG = (左右编码器累计平均，OLED AVG 同款)。每个"保险窗口"从
+ *       上一次固定动作完成时刻起算；AVG ≥ 窗口保险值仍未触发转弯 → 判定漏转：
+ *       - 普通窗口：直接固定 90° 转（无固定前进）；
+ *       - B 模式 A-D/D-A 首段"特殊 T 不转、应固定直行到 Q"漏检时：补救=固定直行到Q。
+ * 窗口索引 = Route_SegmentTurnCount（普通段 1 窗口、AD 段 5 窗口）。
+ * 保险值表见 Car_InsuranceGetWindow()；方向表见 Car_InsuranceGetDir()。
+ * 若实车保险转的方向反了，翻对应方向数组即可。 */
+#define CAR_INSUR_ENABLE            1
+
 /* 主循环固定时间片：约 10ms。当前仅做循迹、路口和计时逻辑。 */
 #define CAR_LOOP_PERIOD_MS           10
 
@@ -108,7 +119,7 @@
 #define CAR_OBST_CONFIRM_TIMES       1    /* 前端连续几次采样<阈值才触发 */
 #define CAR_OBST_STOP_TICKS          30   /* 统一停稳窗口(约0.5s) */
 #define CAR_OBST_DRIVE_PWM           30   /* 各直行段速度 */
-#define CAR_OBST_ENC_FIXED           550  /* 固定直走编码器值(OLED AVG同单位) */
+#define CAR_OBST_ENC_FIXED           700  /* 固定直走编码器值(OLED AVG同单位) */
 #define CAR_OBST_FRONT_GONE_CM       30   /* 横移段：US1 无回波 或 大于此距离=脱离木块 */
 #define CAR_OBST_FIND_FORWARD        200  /* 找线段固定直行编码器值(OLED AVG同单位,
                                            * 70计数≈1cm, 走到此量再第4次90°转回正) */
@@ -226,6 +237,8 @@ static uint8_t Route_TurnEndsSegment = 0;
 static uint32_t Route_CurrentMs = 0;
 static uint32_t Route_SegmentMs[CAR_ROUTE_SEGMENT_COUNT] = {0};
 static uint8_t Route_SegmentClosed[CAR_ROUTE_SEGMENT_COUNT] = {0};
+static int32_t Ins_BaseAvg = 0;            /* 保险窗口起点AVG(上次固定动作完成时刻) */
+
 static uint8_t Work_Mode = CAR_WORK_MODE_A;
 static uint8_t ModeB_State = CAR_MODE_B_STATE_IDLE;
 static uint16_t ModeB_Stop_Tick = 0;
@@ -626,6 +639,7 @@ static void Car_StartRouteTiming(void)
 	Car_TimeSync();
 	Route_Active = 1;
 	Route_JustStarted = 1;
+	Ins_BaseAvg = 0;   /* 整段起点：保险从0开始计 */
 }
 
 static void Car_StopRouteTiming(void)
@@ -873,6 +887,46 @@ static void Car_StartSharpTurn(uint8_t Direction)
 	Car_StartSharpTurnEx(Direction, 1);
 }
 
+/* 漏转保险专用：不做固定前进，直接从当前编码器位置闭环原地90°；
+ * 与正常T弯一样累计 Route_SegmentTurnCount 并决定是否结束本段。 */
+static void Car_StartPivotTurnEx(uint8_t Direction, uint8_t CountRouteTurn)
+{
+	uint8_t TargetTurnCount;
+
+	Car_ClearLinePD();
+	Line_State = CAR_LINE_STATE_FIXED_TURN;
+	Turn_Direction = Direction;
+	Turn_Tick = 0;
+	Turn_Cooldown_Tick = 0;
+	Sharp_Left_Count = 0;
+	Sharp_Right_Count = 0;
+	Turn_Entry_Left_Total = Encoder_Left_Total;
+	Turn_Entry_Right_Total = Encoder_Right_Total;
+	Turn_Forward_Count = 0;
+	Turn_Left_Encoder_Count = 0;
+	Turn_Right_Encoder_Count = 0;
+	Turn_Left_Encoder_Reached = 0;
+	Turn_Right_Encoder_Reached = 0;
+	Car_LoadTurnEncoderTargets(Direction);
+	Line_Mode = 'I';   /* 保险触发的90° */
+
+	Route_TurnEndsSegment = 0;
+	if (CountRouteTurn
+		&& Route_Active && !Route_Done
+		&& (Route_CurrentSegment < CAR_ROUTE_SEGMENT_COUNT))
+	{
+		if (Route_SegmentTurnCount < 255)
+		{
+			Route_SegmentTurnCount++;
+		}
+		TargetTurnCount = Car_GetRouteTurnTarget();
+		if (Route_SegmentTurnCount >= TargetTurnCount)
+		{
+			Route_TurnEndsSegment = 1;
+		}
+	}
+}
+
 static uint8_t Car_GetModeBQTurnDirection(void)
 {
 	const CAR_ROUTE_STEP *Step;
@@ -976,6 +1030,134 @@ static void Car_ModeBStartRejoinTurn(void)
 	/* 重新识别黑线后的这次固定动作不计入 A-D/D-A 的后续 3 个 T。
 	 * 这里走零前冲闭环转向(不再先前进累计)，停车点即转弯点。 */
 	Car_ModeBStartEncoderTurn(Car_GetModeBRejoinTurnDirection());
+}
+
+/* ===== 漏转保险：查询/执行 ===== */
+static int32_t Ins_GetAvgNow(void)
+{
+	return (Encoder_Left_Total + Encoder_Right_Total) / 2;
+}
+
+static uint8_t Ins_IsFwdNormalStep(const CAR_ROUTE_STEP *S)
+{
+	if (((S->From == 'A') && (S->To == 'B')) ||
+	    ((S->From == 'B') && (S->To == 'C')) ||
+	    ((S->From == 'C') && (S->To == 'D')))
+	{
+		return 1;
+	}
+	return 0;
+}
+
+/* 取当前窗口保险值(0=该窗口无保险)。窗口 idx = Route_SegmentTurnCount。
+ * 普通段(顺6959/逆7298)只有 idx0 一个窗口；
+ * A-D/D-A 各 5 窗口：AD 1968/3420/3720/3720/1968；DA 1710/3720/3420/3420/1710。 */
+static uint32_t Ins_GetValue(const CAR_ROUTE_STEP *S, uint8_t Idx)
+{
+	static const uint32_t InsAdVals[5] = {1968UL, 3420UL, 3720UL, 3720UL, 1968UL};
+	static const uint32_t InsDaVals[5] = {1710UL, 3720UL, 3420UL, 3420UL, 1710UL};
+
+	if (Ins_IsFwdNormalStep(S))
+	{
+		return (Idx == 0) ? 6959UL : 0UL;
+	}
+	if (((S->From == 'B') && (S->To == 'A')) ||
+	    ((S->From == 'C') && (S->To == 'B')) ||
+	    ((S->From == 'D') && (S->To == 'C')))
+	{
+		return (Idx == 0) ? 7298UL : 0UL;
+	}
+	if ((S->From == 'A') && (S->To == 'D'))
+	{
+		return (Idx < 5) ? InsAdVals[Idx] : 0UL;
+	}
+	if ((S->From == 'D') && (S->To == 'A'))
+	{
+		return (Idx < 5) ? InsDaVals[Idx] : 0UL;
+	}
+	return 0UL;
+}
+
+/* 保险触发时该窗口应转方向：顺普通左(逆时针)、逆普通右；AD 与 DA 互补表。
+ * 若实车保险转反，翻 AD/DA 两表对应项即可(镜像)。 */
+static uint8_t Ins_GetDir(const CAR_ROUTE_STEP *S, uint8_t Idx)
+{
+	static const uint8_t InsAdDir[5] = {CAR_TURN_LEFT, CAR_TURN_RIGHT, CAR_TURN_RIGHT,
+	                                    CAR_TURN_LEFT, CAR_TURN_LEFT};
+	static const uint8_t InsDaDir[5] = {CAR_TURN_RIGHT, CAR_TURN_LEFT, CAR_TURN_LEFT,
+	                                    CAR_TURN_RIGHT, CAR_TURN_RIGHT};
+
+	if (Ins_IsFwdNormalStep(S)) {return CAR_TURN_LEFT;}
+	if (((S->From == 'B') && (S->To == 'A')) ||
+	    ((S->From == 'C') && (S->To == 'B')) ||
+	    ((S->From == 'D') && (S->To == 'C')))
+	{
+		return CAR_TURN_RIGHT;
+	}
+	if ((S->From == 'A') && (S->To == 'D'))
+	{
+		return (Idx < 5) ? InsAdDir[Idx] : CAR_TURN_LEFT;
+	}
+	if ((S->From == 'D') && (S->To == 'A'))
+	{
+		return (Idx < 5) ? InsDaDir[Idx] : CAR_TURN_RIGHT;
+	}
+	return CAR_TURN_LEFT;
+}
+
+/* 保险主逻辑：在循迹正常跟随段每帧调用，返回1=已触发(让位)。
+ * 本窗口累计 AVG ≥ 保险值 → 判定漏转：
+ *  - B模式 A-D/D-A 首段"特殊T不转"窗口(idx0、ModeB尚空闲)漏检 → 补救=直行到Q；
+ *  - 其它窗口 → 直接固定90°(无前进)并正常累计路段转弯数。 */
+static uint8_t Car_InsuranceRun(void)
+{
+	const CAR_ROUTE_STEP *Step;
+	uint8_t Idx;
+	uint32_t Value;
+	uint8_t Dir;
+	int32_t Since;
+
+	if (!CAR_INSUR_ENABLE
+	 || !Route_Active
+	 || Route_Done
+	 || (Route_CurrentSegment >= CAR_ROUTE_SEGMENT_COUNT))
+	{
+		return 0;
+	}
+	Step = &Car_RouteMap[Route_SelectedMode][Route_CurrentSegment];
+	Idx = Route_SegmentTurnCount;
+
+	/* B 模式 AD 首段：第一个特殊 T 应“不转、直行到Q”。漏检补救=进入直行到Q。 */
+	if ((Work_Mode == CAR_WORK_MODE_B)
+	 && Car_IsCurrentModeBSpecialSegment()
+	 && (ModeB_State == CAR_MODE_B_STATE_IDLE)
+	 && (Idx == 0))
+	{
+		Value = Ins_GetValue(Step, 0);
+		Since = Ins_GetAvgNow() - Ins_BaseAvg;
+		if ((Value != 0UL) && (Since >= (int32_t)Value))
+		{
+			Car_ModeBStartForwardToQ();
+			Ins_BaseAvg = Ins_GetAvgNow();
+			return 1;
+		}
+		return 0;
+	}
+
+	Value = Ins_GetValue(Step, Idx);
+	if (Value == 0UL)
+	{
+		return 0;
+	}
+	Since = Ins_GetAvgNow() - Ins_BaseAvg;
+	if (Since >= (int32_t)Value)
+	{
+		Dir = Ins_GetDir(Step, Idx);
+		Car_StartPivotTurnEx(Dir, 1);   /* 保险90°，转完经 FinishSharpTurn 收尾 */
+		Ins_BaseAvg = Ins_GetAvgNow();
+		return 1;
+	}
+	return 0;
 }
 
 static uint8_t Car_IsModeBNavBusy(void)
@@ -1129,6 +1311,9 @@ static void Car_RunModeBNav(void)
 
 static void Car_FinishSharpTurn(void)
 {
+	/* 固定动作完成 = 保险新窗口起点 */
+	Ins_BaseAvg = Ins_GetAvgNow();
+
 	Turn_Last_Forward_Count = Turn_Forward_Count;
 	Car_ResetLineController();
 	Turn_Cooldown_Tick = CAR_TURN_COOLDOWN_TICKS;
@@ -1684,6 +1869,11 @@ static void Car_LineFollowStraight(void)
 	else if (Car_UpdateSharpTurnDetect())
 	{
 		Car_RunSharpTurn();
+		return;
+	}
+	else if (Car_InsuranceRun())
+	{
+		/* 漏转保险：按路程AVG兜底触发(直接90°/B特殊直行到Q) */
 		return;
 	}
 

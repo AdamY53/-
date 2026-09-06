@@ -1,4 +1,37 @@
-# Codex Change Log
+# Codex ChangeLog
+
+## 2026-08-24 - INSUR: route segment missed-turn insurance (A/B modes)
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed (per user):
+- New "route insurance": if a 90-degree junction was not detected by the
+  gray sensors, the car falls back by distance (AVG counts since the last
+  completed fixed action) and forces the missing action, so it never runs
+  off the track.
+  - Value table (window = index in Route_SegmentTurnCount):
+    forward normal segments AB/BC/CD = 6959; reverse BA/CB/DC = 7298;
+    A-D = 1968,3420,3720,3720,1968; D-A = 1710,3720,3420,3420,1710.
+  - Direction table: forward normal = LEFT; reverse = RIGHT; A-D = L,R,R,L,L;
+    D-A = R,L,L,R,R (mirror; flip tables if real-car direction is reversed).
+  - Triggered action: fixed 90-degree pivot with no entry drive
+    (`Car_StartPivotTurnEx`, still counts the route turn and can end the
+    segment, so normal route flow continues).
+  - B-mode special window (A-D/D-A first segment, first special T that
+    should NOT turn but drive straight to Q): if it was missed and AVG
+    exceeds the window value, the rescue action is to enter the drive-to-Q
+    phase (`Car_ModeBStartForwardToQ`), not a turn.
+- Base AVG reset: at each finished fixed action (`Car_FinishSharpTurn`),
+  at route start (`Car_StartRouteTiming`); insurance is checked in line
+  following after sharp-turn detection (cooldown excluded). Enabled by
+  `CAR_INSUR_ENABLE` (1).
+
+Build/verification:
+- Reviewed (UTF-8 paren/brace 731/731, 315/315); ARMCC build to be
+  re-run in Keil.
 
 ## 2026-08-24 - OBST: FIND = see line -> drive 200 -> 4th 90 turn (one action)
 
