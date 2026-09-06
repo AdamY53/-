@@ -13,7 +13,7 @@
 #define CAR_LINE_KP                0.084f
 #define CAR_LINE_KD                0.064f
 #define CAR_ENCODER_BALANCE_KP     0.350f
-#define CAR_STEER_LIMIT            25.0f
+#define CAR_STEER_LIMIT            30.0f
 #define CAR_BALANCE_LIMIT          5.0f
 /* 直行修正参数：
  * CAR_STRAIGHT_PWM_TRIM —— 静态补正(0=关)。左右轮机械/电机不一致时车会
@@ -23,10 +23,10 @@
  * 该值同时作用于：绕障直行段、模式B离线段、循迹直线输出。
  * CAR_STRAIGHT_BALANCE_KP —— 直行段(绕障/无黑线直行)编码器差速平衡增益；
  * 循迹段仍用上方 CAR_ENCODER_BALANCE_KP。若直行仍画S/偏，可整体调大。 */
-#define CAR_STRAIGHT_PWM_TRIM      0
+#define CAR_STRAIGHT_PWM_TRIM      2
 #define CAR_STRAIGHT_BALANCE_KP    0.6f
-#define CAR_MIN_FORWARD_PWM        20.0f
-#define CAR_PWM_LIMIT              60.0f
+#define CAR_MIN_FORWARD_PWM        23.0f
+#define CAR_PWM_LIMIT              58.0f
 
 /* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 10ms，数值越大越不容易误触发。 */
 #define CAR_SHARP_CONFIRM_TICKS    1
@@ -35,7 +35,7 @@
 /* 可调窗口：边缘双探头 T 路口兜底开关。1=最左两路或最右两路同时高电平也触发前进转弯。 */
 #define CAR_EDGE_PAIR_T_ENABLE     0
 /* 可调窗口：检测到 T 路口后先前进的编码器累计值，单位和 OLED 第五行 L/R 显示一致。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 300
+#define CAR_TURN_ENTRY_FORWARD_COUNT 0
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
 #define CAR_TURN_ENTRY_COUNT_WINDOW  8
 /* 可调窗口：编码器异常时最大前探周期数，每个周期约 10ms，防止一直前进。 */
