@@ -1082,27 +1082,27 @@ static uint32_t Ins_GetValue(const CAR_ROUTE_STEP *S, uint8_t Idx)
  * 若实车保险转反，翻 AD/DA 两表对应项即可(镜像)。 */
 static uint8_t Ins_GetDir(const CAR_ROUTE_STEP *S, uint8_t Idx)
 {
-	static const uint8_t InsAdDir[5] = {CAR_TURN_LEFT, CAR_TURN_RIGHT, CAR_TURN_RIGHT,
-	                                    CAR_TURN_LEFT, CAR_TURN_LEFT};
-	static const uint8_t InsDaDir[5] = {CAR_TURN_RIGHT, CAR_TURN_LEFT, CAR_TURN_LEFT,
+	static const uint8_t InsAdDir[5] = {CAR_TURN_RIGHT, CAR_TURN_LEFT, CAR_TURN_LEFT,
 	                                    CAR_TURN_RIGHT, CAR_TURN_RIGHT};
+	static const uint8_t InsDaDir[5] = {CAR_TURN_LEFT, CAR_TURN_RIGHT, CAR_TURN_RIGHT,
+	                                    CAR_TURN_LEFT, CAR_TURN_LEFT};
 
-	if (Ins_IsFwdNormalStep(S)) {return CAR_TURN_LEFT;}
+	if (Ins_IsFwdNormalStep(S)) {return CAR_TURN_RIGHT;}
 	if (((S->From == 'B') && (S->To == 'A')) ||
 	    ((S->From == 'C') && (S->To == 'B')) ||
 	    ((S->From == 'D') && (S->To == 'C')))
 	{
-		return CAR_TURN_RIGHT;
+		return CAR_TURN_LEFT;
 	}
 	if ((S->From == 'A') && (S->To == 'D'))
 	{
-		return (Idx < 5) ? InsAdDir[Idx] : CAR_TURN_LEFT;
+		return (Idx < 5) ? InsAdDir[Idx] : CAR_TURN_RIGHT;
 	}
 	if ((S->From == 'D') && (S->To == 'A'))
 	{
-		return (Idx < 5) ? InsDaDir[Idx] : CAR_TURN_RIGHT;
+		return (Idx < 5) ? InsDaDir[Idx] : CAR_TURN_LEFT;
 	}
-	return CAR_TURN_LEFT;
+	return CAR_TURN_RIGHT;
 }
 
 /* 保险主逻辑：在循迹正常跟随段每帧调用，返回1=已触发(让位)。
