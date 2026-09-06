@@ -2021,7 +2021,10 @@ static void OLED_ShowTrackPage(void)
 		}
 		else
 		{
-			OLED_Printf(0, 32, OLED_8X16, "MODE:%s", (char *)Car_RouteModeText[Route_SelectedMode]);
+			/* 第32行显示 模式字母(A/B) + 路线名，方便确认当前模式 */
+			OLED_Printf(0, 32, OLED_8X16, "MODE:%c %s",
+			            (Work_Mode == CAR_WORK_MODE_B) ? 'B' : 'A',
+			            (char *)Car_RouteModeText[Route_SelectedMode]);
 			if (Route_Done)
 			{
 				OLED_Printf(0, 48, OLED_8X16, "SEG:DONE");
