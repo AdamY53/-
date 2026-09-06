@@ -1,5 +1,29 @@
 # Codex Change Log
 
+## 2026-08-24 - OBST: X1 exit >30cm; FIND = fixed straight + 90 turn
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed (per user review of the bypass flow table):
+- X1 (cross-drive) now exits when the front US1 has no echo OR reads above
+  `CAR_OBST_FRONT_GONE_CM` (new, 30cm) instead of echo-loss only.
+- FIND no longer snakes for the line: it drives straight (balanced) for
+  `CAR_OBST_FIND_FORWARD` (new, 200 AVG counts, ~2.9cm at 70/cm) then does
+  the 4th 90-degree pivot (back to track heading) like a normal corner; if
+  the line is seen early it hands straight back to line following (no extra
+  pivot). The settle window between T3 and FIND was removed so the action is
+  continuous (fixed forward + turn).
+- Carries the user's current on-site values: CAR_LINE_KP 0.065,
+  CAR_LINE_KD 0.053, CAR_TURN_ENTRY_FORWARD_COUNT 300,
+  CAR_LOOP_PERIOD_MS 10, CAR_OBST_TRIGGER_CM 25, CAR_OBST_ENC_FIXED 350.
+
+Build/verification:
+- Reviewed (UTF-8 paren/brace 626/626, 286/286); ARMCC build to be
+  re-run in Keil.
+
 ## 2026-08-24 - TURN: restore entry-straight for normal turns, zero-entry for special ones
 
 Branch: `feature/wall-follow-v1`

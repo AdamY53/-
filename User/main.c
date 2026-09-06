@@ -10,8 +10,8 @@
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
 #define CAR_BASE_PWM               32.0f
-#define CAR_LINE_KP                0.084f
-#define CAR_LINE_KD                0.064f
+#define CAR_LINE_KP                0.065f
+#define CAR_LINE_KD                0.053f
 #define CAR_ENCODER_BALANCE_KP     0.350f
 #define CAR_STEER_LIMIT            30.0f
 #define CAR_BALANCE_LIMIT          5.0f
@@ -40,7 +40,7 @@
  * 注意：太大(如300≈4.3cm在部分弯口仍可能冲过)会表现为不转；建议从
  * 约100(~1.5cm)起步逐步加，直到“刚好走到想转的位置”。
  * 零前冲的场合(障碍绕障、模式B停稳后转向)不走本宏。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 100
+#define CAR_TURN_ENTRY_FORWARD_COUNT 300
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
 #define CAR_TURN_ENTRY_COUNT_WINDOW  8
 /* 可调窗口：编码器异常时最大前探周期数，每个周期约 10ms，防止一直前进。 */
@@ -64,7 +64,7 @@
 #define CAR_TURN_COOLDOWN_TICKS      24
 
 /* 主循环固定时间片：约 10ms。当前仅做循迹、路口和计时逻辑。 */
-#define CAR_LOOP_PERIOD_MS           20
+#define CAR_LOOP_PERIOD_MS           10
 
 /* 可调窗口：A-D/D-A 路段包含 4 个中间 T 和第 5 个目标 T。 */
 #define CAR_ROUTE_AD_T_COUNT         5
@@ -104,11 +104,14 @@
  *       无值时停稳→左转90°→停稳→直行找线,灰度≥LINE_MIN时停稳→右转
  *       90°回正→云台回正→交还正常循迹。所有“停稳”统一用
  *       CAR_OBST_STOP_TICKS 一个窗口调试。 */
-#define CAR_OBST_TRIGGER_CM          22   /* 前端触发阈值(cm) */
+#define CAR_OBST_TRIGGER_CM          25   /* 前端触发阈值(cm) */
 #define CAR_OBST_CONFIRM_TIMES       1    /* 前端连续几次采样<阈值才触发 */
 #define CAR_OBST_STOP_TICKS          30   /* 统一停稳窗口(约0.5s) */
 #define CAR_OBST_DRIVE_PWM           30   /* 各直行段速度 */
-#define CAR_OBST_ENC_FIXED           500  /* 固定直走编码器值(OLED AVG同单位) */
+#define CAR_OBST_ENC_FIXED           350  /* 固定直走编码器值(OLED AVG同单位) */
+#define CAR_OBST_FRONT_GONE_CM       30   /* 横移段：US1 无回波 或 大于此距离=脱离木块 */
+#define CAR_OBST_FIND_FORWARD        200  /* 找线段固定直行编码器值(OLED AVG同单位,
+                                           * 70计数≈1cm, 走到此量再第4次90°转回正) */
 #define CAR_OBST_SIDE_DETECT_CM      60   /* 侧超声“有值”上限,大于此或无效=0 */
 #define CAR_OBST_GONE_CONFIRM        1    /* 无回波/归零的确认帧数 */
 #define CAR_OBST_LINE_CONFIRM        2    /* 灰度见线确认帧数 */
@@ -1364,10 +1367,11 @@ static void Obst_BeginBlock(void)
 	Obst_State = CAR_OBST_STATE_STOP;
 }
 
-/* 车头云台超声是否无回波(横移段:已脱离木块视场) */
+/* 车头云台超声是否已脱离木块视场：无回波 或 距离大于 CAR_OBST_FRONT_GONE_CM */
 static uint8_t Obst_FrontGone(void)
 {
-	return (Ultrasonic_Front_Distance == US_INVALID_DISTANCE_CM) ? 1 : 0;
+	return ((Ultrasonic_Front_Distance == US_INVALID_DISTANCE_CM)
+	     || (Ultrasonic_Front_Distance > CAR_OBST_FRONT_GONE_CM)) ? 1 : 0;
 }
 
 /* 贴壁侧超声是否"有值"(木块侧面在测距范围) */
@@ -1415,10 +1419,12 @@ static void Car_RunObstNav(void)
 		}
 		else if (Obst_TurnSeq == 3u)
 		{
-			/* T3完成 → 停稳 → 找线 */
+			/* T3完成 → 直接进入 FIND 固定前进(不停稳，动作连续) */
 			Obst_Tick = 0;
-			Obst_AfterWait = 1u;   /* 1=进FIND */
-			Obst_State = CAR_OBST_STATE_WAIT;
+			Obst_Confirm2 = 0;
+			Obst_EntryLeftTotal = Encoder_Left_Total;
+			Obst_EntryRightTotal = Encoder_Right_Total;
+			Obst_State = CAR_OBST_STATE_FIND;
 		}
 		else
 		{
@@ -1550,7 +1556,8 @@ static void Car_RunObstNav(void)
 		return;
 	}
 
-	/* —— FIND：蛇行找线，灰度见线后停稳再第4次转回正 —— */
+	/* —— FIND：固定直行 CAR_OBST_FIND_FORWARD 后第4次90°转回正(像普通弯)。
+	 *      提前见线(已压到线)则直接交还循迹，不再多转。 —— */
 	if (Obst_State == CAR_OBST_STATE_FIND)
 	{
 		Obst_Tick++;
@@ -1565,9 +1572,7 @@ static void Car_RunObstNav(void)
 			if (++Obst_Confirm2 >= CAR_OBST_LINE_CONFIRM)
 			{
 				Obst_Confirm2 = 0;
-				Obst_Tick = 0;
-				Obst_AfterWait = 3u;     /* WAIT后执行第4次转(回正) */
-				Obst_State = CAR_OBST_STATE_WAIT;
+				Obst_ResetNav();   /* 已提前回线 → 直接交还循迹 */
 				return;
 			}
 		}
@@ -1575,15 +1580,14 @@ static void Car_RunObstNav(void)
 		{
 			Obst_Confirm2 = 0;
 		}
-		/* 小幅蛇行扫线 */
-		if ((Obst_Tick / 20u) & 1u)
+		AvgEnc = ((Encoder_Left_Total - Obst_EntryLeftTotal)
+		        + (Encoder_Right_Total - Obst_EntryRightTotal)) / 2;
+		if (AvgEnc >= CAR_OBST_FIND_FORWARD)
 		{
-			Car_SetSignedPWM(CAR_OBST_DRIVE_PWM - 4, CAR_OBST_DRIVE_PWM);
+			Obst_DoPivot(4u);      /* 走满 → 第4次转(回正原前进方向) */
+			return;
 		}
-		else
-		{
-			Car_SetSignedPWM(CAR_OBST_DRIVE_PWM, CAR_OBST_DRIVE_PWM - 4);
-		}
+		Car_DriveStraightBalance(CAR_OBST_DRIVE_PWM, CAR_STRAIGHT_BALANCE_KP);
 		return;
 	}
 
