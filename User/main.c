@@ -116,6 +116,7 @@
  *       90°回正→云台回正→交还正常循迹。所有“停稳”统一用
  *       CAR_OBST_STOP_TICKS 一个窗口调试。 */
 #define CAR_OBST_TRIGGER_CM          25   /* 前端触发阈值(cm) */
+#define CAR_OBST_C_DEFAULT_TURN     CAR_TURN_LEFT   /* 模式C(自由避障)默认绕向: 左绕用右超声 */
 #define CAR_OBST_CONFIRM_TIMES       1    /* 前端连续几次采样<阈值才触发 */
 #define CAR_OBST_STOP_TICKS          30   /* 统一停稳窗口(约0.5s) */
 #define CAR_OBST_DRIVE_PWM           30   /* 各直行段速度 */
@@ -157,8 +158,10 @@
 #define CAR_DISPLAY_PAGE_ROUTE      1
 #define CAR_DISPLAY_PAGE_INSURANCE  2   /* 漏转保险调试页(K2 循环切到) */
 
-#define CAR_WORK_MODE_A             0
-#define CAR_WORK_MODE_B             1
+#define CAR_WORK_MODE_A             0   /* 基本要求1+3: 循迹+分段计时+外围物块计数(无限循环) */
+#define CAR_WORK_MODE_B             1   /* 基本要求2: 定点导航 Q/O */
+#define CAR_WORK_MODE_C             2   /* 扩展: 自由循迹+自动避障绕行(不上路程保险/不跑Route) */
+#define CAR_ROUTE_LOOP_ENABLE       1   /* 模式A: 跑完一圈自动下一圈(保险/计时持续), K1停才结束 */
 
 #define CAR_MODE_B_STATE_IDLE            0
 #define CAR_MODE_B_STATE_FORWARD_TO_Q    1
@@ -241,6 +244,7 @@ static uint8_t Route_SegmentClosed[CAR_ROUTE_SEGMENT_COUNT] = {0};
 static int32_t Ins_BaseAvg = 0;            /* 保险窗口起点AVG(上次固定动作完成时刻) */
 
 static uint8_t Work_Mode = CAR_WORK_MODE_A;
+static uint16_t Lap_Count = 0;               /* 模式A已完成圈数(无限循环用) */
 static uint8_t ModeB_State = CAR_MODE_B_STATE_IDLE;
 static uint16_t ModeB_Stop_Tick = 0;
 static int32_t ModeB_Straight_Left_Total = 0;
@@ -283,6 +287,7 @@ typedef struct
 #define CAR_DWT ((CAR_DWT_Type *)0xE0001000UL)
 
 static void Car_RunSharpTurn(void);
+static void Obst_ResetNav(void);
 
 static float LimitFloat(float Value, float Min, float Max)
 {
@@ -506,11 +511,12 @@ static void Car_UltrasonicTask(void)
 {
 	uint16_t Distance;
 
-	/* 基本要求3的外围物块统计只在模式A的地图循迹过程中启用。 */
-	if ((Work_Mode != CAR_WORK_MODE_A)
+	/* 模式A：循迹/分段计时+外围物块计数(仅第一圈计数，之后保存显示)。
+	 * 模式C：自由循迹+避障，也需要前/侧超声采样；模式B 定点导航不采样。 */
+	if (((Work_Mode != CAR_WORK_MODE_A) && (Work_Mode != CAR_WORK_MODE_C))
 	 || !Car_Running
-	 || !Route_Active
-	 || Route_Done)
+	 || ((Work_Mode == CAR_WORK_MODE_A)
+	     && ((!Route_Active) || Route_Done)))
 	{
 		return;
 	}
@@ -547,7 +553,8 @@ static void Car_UltrasonicTask(void)
 	{
 		Distance = Ultrasonic_GetDistanceCm(Ultrasonic_ActiveSide);
 		Ultrasonic_Side_Distance = Distance;
-		if (Work_Mode == CAR_WORK_MODE_A)
+		/* 外围物块计数只在模式A第一圈进行(Lap_Count==0)，之后保留显示不再更新 */
+		if ((Work_Mode == CAR_WORK_MODE_A) && (Lap_Count == 0))
 		{
 			Car_UpdateObjectCount(Distance);
 		}
@@ -706,9 +713,23 @@ static void Car_AdvanceRouteSegment(void)
 	}
 	else
 	{
-		Route_Done = 1;
-		Route_Active = 0;
-		Route_CurrentMs = 0;
+#if CAR_ROUTE_LOOP_ENABLE
+		if ((Work_Mode == CAR_WORK_MODE_A) && Car_Running)
+		{
+			/* 模式A：跑完一圈(回到出发点)自动进入下一圈；
+			 * 保险/计时持续，物块计数只在第一圈(Lap_Count==0)进行，之后保存显示。 */
+			Lap_Count++;
+			Route_CurrentSegment = 0;
+			Route_Active = 1;
+			Route_JustStarted = 1;
+		}
+		else
+#endif
+		{
+			Route_Done = 1;
+			Route_Active = 0;
+			Route_CurrentMs = 0;
+		}
 	}
 }
 
@@ -776,12 +797,21 @@ static void Car_ToggleWorkMode(void)
 	{
 		Work_Mode = CAR_WORK_MODE_B;
 	}
+	else if (Work_Mode == CAR_WORK_MODE_B)
+	{
+		Work_Mode = CAR_WORK_MODE_C;
+	}
 	else
 	{
 		Work_Mode = CAR_WORK_MODE_A;
 	}
+	Lap_Count = 0;
+	Obst_ResetNav();
+	Servo_SetAngle(CAR_OBST_SERVO_FRONT);
+	Car_ResetLineController();
 	Car_ResetUltrasonicDetection();
 	Car_ResetModeBNav();
+	Car_Stop();
 }
 
 static uint8_t Car_IsTurnEncoderTargetReached(int32_t Current, int32_t Target)
@@ -1126,7 +1156,9 @@ static uint8_t Car_InsuranceRun(void)
 	uint8_t Dir;
 	int32_t Since;
 
+	/* 保险只属于 A/B(有Route的循迹)；模式C 自由避障不上保险 */
 	if (!CAR_INSUR_ENABLE
+	 || (Work_Mode == CAR_WORK_MODE_C)
 	 || !Route_Active
 	 || Route_Done
 	 || (Route_CurrentSegment >= CAR_ROUTE_SEGMENT_COUNT))
@@ -1542,7 +1574,15 @@ static void Obst_BeginBlock(void)
 	Obst_EntryLeftTotal = Encoder_Left_Total;
 	Obst_EntryRightTotal = Encoder_Right_Total;
 
-	if (Route_SelectedMode >= CAR_ROUTE_MODE_COUNT / 2)
+	if (Work_Mode == CAR_WORK_MODE_C)
+	{
+		/* 模式C(自由避障)：按固定默认绕向 */
+		Obst_TurnDir = CAR_OBST_C_DEFAULT_TURN;
+		Obst_SideChan = (Obst_TurnDir == CAR_TURN_LEFT) ? US_CH_RIGHT : US_CH_LEFT;
+		Servo_SetAngle((Obst_TurnDir == CAR_TURN_LEFT)
+		             ? CAR_OBST_SERVO_RIGHT : CAR_OBST_SERVO_LEFT);
+	}
+	else if (Route_SelectedMode >= CAR_ROUTE_MODE_COUNT / 2)
 	{
 		/* 反向路线(4-7)：右绕，贴壁用左超声，云台预转向左 */
 		Obst_TurnDir = CAR_TURN_RIGHT;
@@ -1807,16 +1847,15 @@ static void Car_RunObstNav(void)
 	}
 }
 
-/* 循迹每帧调用：空闲时检查触发就绪；绕障忙时接管循迹，返回1=本帧已占用 */
+/* 循迹每帧调用：空闲时检查触发就绪；绕障忙时接管循迹，返回1=本帧已占用。
+ * 避障只属于模式C(拓展)；模式A/B 不自动绕障。 */
 static uint8_t Car_ObstMonitor(void)
 {
 	if (Obst_State == CAR_OBST_STATE_IDLE)
 	{
-		/* 仅模式A地图循迹、正常压线(非转弯/冷却)时响应触发就绪 */
-		if ((Work_Mode != CAR_WORK_MODE_A)
+		/* 仅模式C自由循迹、正常压线(非转弯/冷却)时响应触发就绪 */
+		if ((Work_Mode != CAR_WORK_MODE_C)
 		 || !Car_Running
-		 || !Route_Active
-		 || Route_Done
 		 || (Line_State != CAR_LINE_STATE_FOLLOW)
 		 || (Turn_Cooldown_Tick > 0))
 		{
@@ -1974,16 +2013,26 @@ static void OLED_ShowTrackPage(void)
 	}
 	else
 	{
-	OLED_Printf(0, 32, OLED_8X16, "MODE:%s", (char *)Car_RouteModeText[Route_SelectedMode]);
-	if (Route_Done)
-	{
-		OLED_Printf(0, 48, OLED_8X16, "SEG:DONE  %c", (Work_Mode == CAR_WORK_MODE_B) ? 'B' : 'A');
-	}
-	else
-	{
-		OLED_Printf(0, 48, OLED_8X16, "SEG:%c-%c    %c", Step->From, Step->To,
-		            (Work_Mode == CAR_WORK_MODE_B) ? 'B' : 'A');
-	}
+		if (Work_Mode == CAR_WORK_MODE_C)
+		{
+			/* 模式C：自由循迹+避障，不跑路段 */
+			OLED_ShowString(0, 32, "MODE:C   ", OLED_8X16);
+			OLED_ShowString(0, 48, "FREERUN", OLED_8X16);
+		}
+		else
+		{
+			OLED_Printf(0, 32, OLED_8X16, "MODE:%s", (char *)Car_RouteModeText[Route_SelectedMode]);
+			if (Route_Done)
+			{
+				OLED_Printf(0, 48, OLED_8X16, "SEG:DONE");
+			}
+			else
+			{
+				/* A/B 循迹段+圈数(A模式无限循环显示当前第几圈) */
+				OLED_Printf(0, 48, OLED_8X16, "%c-%c L%02u", Step->From, Step->To,
+				            (unsigned int)(Lap_Count % 100u));
+			}
+		}
 	}
 	OLED_Update();
 }
@@ -2099,12 +2148,21 @@ static void Key_Task(void)
 		if (Car_Running)
 		{
 			Car_ResetEncoderTotals();
-			Car_StartRouteTiming();
+			if (Work_Mode != CAR_WORK_MODE_C)
+			{
+				/* 模式A/B 启动路线(含保险起点)；C 模式自由循迹不上路线 */
+				Lap_Count = 0;
+				Ins_BaseAvg = 0;
+				Car_StartRouteTiming();
+			}
 		}
 		if (!Car_Running)
 		{
 			Car_Stop();
-			Car_StopRouteTiming();
+			if (Work_Mode != CAR_WORK_MODE_C)
+			{
+				Car_StopRouteTiming();
+			}
 		}
 	}
 	else if (KeyNum == KEY_NUM_K2)

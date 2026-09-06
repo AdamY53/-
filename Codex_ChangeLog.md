@@ -1,5 +1,36 @@
 # Codex ChangeLog
 
+## 2026-08-24 - ARCH: mode roles split A/B/C, mode A laps forever
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed (per user + task doc 控制.docx):
+- Mode roles: A = basic reqs 1+3 (line following + per-segment timing +
+  perimeter block counting); B = basic req 2 (Q/O point navigation);
+  C = extension (road obstacle bypass) as a NEW standalone mode
+  (K3 long press now cycles A -> B -> C).
+- Mode A now laps forever (`CAR_ROUTE_LOOP_ENABLE`): after finishing one
+  lap the route restarts at segment 0 with Lap_Count++ (insurance, timing
+  and segment display continue; OLED shows current lap). K1 stop ends it.
+- Perimeter block counting stays first-lap only (`Lap_Count == 0`) then the
+  count is frozen on the display, as before.
+- Obstacle bypass moved to mode C only (`Car_ObstMonitor` now arms only in
+  mode C, no Route requirement); A/B no longer auto-bypass. C is
+  free line-following + bypass, no route insurance (insurance excludes
+  mode C), no route timing. `Obst_BeginBlock` uses a fixed default turn
+  side in mode C (`CAR_OBST_C_DEFAULT_TURN`, default LEFT/right sensor).
+- K1 in mode C does not start route timing; switching modes resets bypass,
+  servo to front, line controller.
+- OLED Track page: shows `MODE:C / FREERUN` in mode C; in A/B shows the
+  segment + lap number (e.g. `A-B L01`).
+
+Build/verification:
+- Reviewed (UTF-8 paren/brace 808/808, 326/326); ARMCC build to be
+  re-run in Keil.
+
 ## 2026-08-24 - INSUR: route segment missed-turn insurance (A/B modes)
 
 Branch: `feature/wall-follow-v1`
