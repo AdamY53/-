@@ -1051,8 +1051,12 @@ static uint8_t Ins_IsFwdNormalStep(const CAR_ROUTE_STEP *S)
 }
 
 /* 取当前窗口保险值(0=该窗口无保险)。窗口 idx = Route_SegmentTurnCount。
- * 普通段(顺6959/逆7298)只有 idx0 一个窗口；
- * A-D/D-A 各 5 窗口：AD 1968/3420/3720/3720/1968；DA 1710/3720/3420/3420/1710。 */
+ * 点位口径：D→A 依次过 a,b,c,d(a 近 D、d 近 A)；A→D 倒序 d,c,b,a。
+ * 普通段(单窗口)：顺 AB/BC/CD=6959；逆 BA/CB/DC=7298。
+ * A-D(倒序) 5 窗口 = A→d, d→c, c→b, b→a, a→D：
+ *   1968 / 3420 / 3720 / 3720 / 1968
+ * D-A(顺序) 5 窗口 = D→a, a→b, b→c, c→d, d→A：
+ *   1710 / 3720 / 3420 / 3420 / 1710 */
 static uint32_t Ins_GetValue(const CAR_ROUTE_STEP *S, uint8_t Idx)
 {
 	static const uint32_t InsAdVals[5] = {1968UL, 3420UL, 3720UL, 3720UL, 1968UL};
