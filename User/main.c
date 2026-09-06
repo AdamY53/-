@@ -80,7 +80,7 @@
 #define CAR_MODE_B_REJOIN_T_COUNT    3
 
 /* 可调窗口：超声波采样间隔，每个周期约10ms；前方和当前外侧模块轮流采样。 */
-#define CAR_ULTRASONIC_SAMPLE_TICKS  10
+#define CAR_ULTRASONIC_SAMPLE_TICKS  5
 /* 可调窗口：外围物块认定范围，单位厘米。 */
 #define CAR_OBJECT_MIN_CM            23
 #define CAR_OBJECT_MAX_CM            35
@@ -108,7 +108,7 @@
 #define CAR_OBST_CONFIRM_TIMES       1    /* 前端连续几次采样<阈值才触发 */
 #define CAR_OBST_STOP_TICKS          30   /* 统一停稳窗口(约0.5s) */
 #define CAR_OBST_DRIVE_PWM           30   /* 各直行段速度 */
-#define CAR_OBST_ENC_FIXED           350  /* 固定直走编码器值(OLED AVG同单位) */
+#define CAR_OBST_ENC_FIXED           550  /* 固定直走编码器值(OLED AVG同单位) */
 #define CAR_OBST_FRONT_GONE_CM       30   /* 横移段：US1 无回波 或 大于此距离=脱离木块 */
 #define CAR_OBST_FIND_FORWARD        200  /* 找线段固定直行编码器值(OLED AVG同单位,
                                            * 70计数≈1cm, 走到此量再第4次90°转回正) */
@@ -1419,9 +1419,10 @@ static void Car_RunObstNav(void)
 		}
 		else if (Obst_TurnSeq == 3u)
 		{
-			/* T3完成 → 直接进入 FIND 固定前进(不停稳，动作连续) */
+			/* T3完成 → 直接进入 FIND(不停稳)：等灰度见线→直行200→第4次回正 */
 			Obst_Tick = 0;
 			Obst_Confirm2 = 0;
+			Obst_SideSeen = 0;
 			Obst_EntryLeftTotal = Encoder_Left_Total;
 			Obst_EntryRightTotal = Encoder_Right_Total;
 			Obst_State = CAR_OBST_STATE_FIND;
@@ -1556,8 +1557,9 @@ static void Car_RunObstNav(void)
 		return;
 	}
 
-	/* —— FIND：固定直行 CAR_OBST_FIND_FORWARD 后第4次90°转回正(像普通弯)。
-	 *      提前见线(已压到线)则直接交还循迹，不再多转。 —— */
+	/* —— FIND：合体固定动作——先等灰度见线(≥LINE_MIN,连续2帧)，
+	 *      见线后直行 CAR_OBST_FIND_FORWARD(200)，再第4次90°转回正。
+	 *      见线只是动作起点(此时清零直行里程)，不再提前交还。 —— */
 	if (Obst_State == CAR_OBST_STATE_FIND)
 	{
 		Obst_Tick++;
@@ -1567,24 +1569,32 @@ static void Car_RunObstNav(void)
 			Car_Stop();
 			return;
 		}
-		if (Gray_ActiveCount >= CAR_OBST_LINE_MIN)
+		if (!Obst_SideSeen)
 		{
-			if (++Obst_Confirm2 >= CAR_OBST_LINE_CONFIRM)
+			/* 第一小段：等灰度见线；见线瞬间把直行里程清零 */
+			if (Gray_ActiveCount >= CAR_OBST_LINE_MIN)
+			{
+				if (++Obst_Confirm2 >= CAR_OBST_LINE_CONFIRM)
+				{
+					Obst_Confirm2 = 0;
+					Obst_SideSeen = 1;
+					Obst_EntryLeftTotal = Encoder_Left_Total;
+					Obst_EntryRightTotal = Encoder_Right_Total;
+				}
+			}
+			else
 			{
 				Obst_Confirm2 = 0;
-				Obst_ResetNav();   /* 已提前回线 → 直接交还循迹 */
-				return;
 			}
+			Car_DriveStraightBalance(CAR_OBST_DRIVE_PWM, CAR_STRAIGHT_BALANCE_KP);
+			return;
 		}
-		else
-		{
-			Obst_Confirm2 = 0;
-		}
+		/* 第二小段：已见线，直行满 200 → 第4次90°回正 */
 		AvgEnc = ((Encoder_Left_Total - Obst_EntryLeftTotal)
 		        + (Encoder_Right_Total - Obst_EntryRightTotal)) / 2;
 		if (AvgEnc >= CAR_OBST_FIND_FORWARD)
 		{
-			Obst_DoPivot(4u);      /* 走满 → 第4次转(回正原前进方向) */
+			Obst_DoPivot(4u);
 			return;
 		}
 		Car_DriveStraightBalance(CAR_OBST_DRIVE_PWM, CAR_STRAIGHT_BALANCE_KP);

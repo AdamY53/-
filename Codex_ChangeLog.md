@@ -1,5 +1,29 @@
 # Codex Change Log
 
+## 2026-08-24 - OBST: FIND = see line -> drive 200 -> 4th 90 turn (one action)
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed (per user): the FIND phase is one combined fixed action:
+1. wait until grayscale shows >= CAR_OBST_LINE_MIN for
+   CAR_OBST_LINE_CONFIRM frames (line sight is the action START, at which
+   point the drive distance resets);
+2. drive straight CAR_OBST_FIND_FORWARD(200) AVG counts;
+3. 4th 90-degree pivot back to the track heading;
+then hand back to line following.
+- No more "see line -> hand back immediately".
+- `Obst_SideSeen` is cleared when entering FIND (reused as the
+  "line sighted" flag) and reset when pivot 4 completes via Obst_ResetNav.
+- Carries user's on-site values: CAR_ULTRASONIC_SAMPLE_TICKS 5,
+  CAR_OBST_ENC_FIXED 550.
+
+Build/verification:
+- Reviewed (UTF-8 paren/brace 627/627, 287/287); ARMCC build to be
+  re-run in Keil.
+
 ## 2026-08-24 - OBST: X1 exit >30cm; FIND = fixed straight + 90 turn
 
 Branch: `feature/wall-follow-v1`
