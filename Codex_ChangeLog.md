@@ -1,5 +1,29 @@
 # Codex Change Log
 
+## 2026-08-24 - TURN: restore entry-straight for normal turns, zero-entry for special ones
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed (per user requirement "fixed entry drive then turn"):
+- `CAR_TURN_ENTRY_FORWARD_COUNT` back to 100 (tunable start) for normal
+  T/corner turns in mode A and regular mode B tracking; comment documents
+  the encoder/cm conversion (2820 counts ~= 40cm => ~70 counts/cm) and
+  warns that too-large values (>300) make corners appear missed. Start
+  small (~100 = ~1.5cm) and raise until the car reaches the pivot point.
+- Mode B "rejoin after no-line segment" turn now uses
+  `Car_ModeBStartEncoderTurn` (zero entry, pivot in place) instead of
+  `Car_StartSharpTurnEx` (which had an entry drive), per requirement that
+  mode B turns after stopping off-line should not drive forward first.
+- Obstacle-bypass turns already use zero-entry (`Obst_StartPivot`), no
+  change needed.
+
+Build/verification:
+- Reviewed (UTF-8 paren/brace 618/618, 287/287); ARMCC build to be
+  re-run in Keil.
+
 ## 2026-08-24 - DRIVE: TRIM default 0, direction note fixed, applied to line follow
 
 Branch: `feature/wall-follow-v1`

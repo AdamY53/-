@@ -34,8 +34,13 @@
 #define CAR_SHARP_GROUP_ACTIVE_MIN 3
 /* 可调窗口：边缘双探头 T 路口兜底开关。1=最左两路或最右两路同时高电平也触发前进转弯。 */
 #define CAR_EDGE_PAIR_T_ENABLE     0
-/* 可调窗口：检测到 T 路口后先前进的编码器累计值，单位和 OLED 第五行 L/R 显示一致。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 0
+/* 可调窗口：普通循迹(T弯/直角弯)检测后先前进的编码器累计值，单位=OLED AVG
+ * (左右轮平均)。按你实测 2820 计数≈40cm，即每厘米约70计数：
+ * 想要"检测到后先直行 X cm 再原地转"，就填 X*70。
+ * 注意：太大(如300≈4.3cm在部分弯口仍可能冲过)会表现为不转；建议从
+ * 约100(~1.5cm)起步逐步加，直到“刚好走到想转的位置”。
+ * 零前冲的场合(障碍绕障、模式B停稳后转向)不走本宏。 */
+#define CAR_TURN_ENTRY_FORWARD_COUNT 100
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
 #define CAR_TURN_ENTRY_COUNT_WINDOW  8
 /* 可调窗口：编码器异常时最大前探周期数，每个周期约 10ms，防止一直前进。 */
@@ -965,8 +970,9 @@ static void Car_ModeBStartForwardToQ(void)
 static void Car_ModeBStartRejoinTurn(void)
 {
 	ModeB_State = CAR_MODE_B_STATE_REJOIN_TURN;
-	/* 重新识别黑线后的这次固定动作不计入 A-D/D-A 的后续 3 个 T。 */
-	Car_StartSharpTurnEx(Car_GetModeBRejoinTurnDirection(), 0);
+	/* 重新识别黑线后的这次固定动作不计入 A-D/D-A 的后续 3 个 T。
+	 * 这里走零前冲闭环转向(不再先前进累计)，停车点即转弯点。 */
+	Car_ModeBStartEncoderTurn(Car_GetModeBRejoinTurnDirection());
 }
 
 static uint8_t Car_IsModeBNavBusy(void)
