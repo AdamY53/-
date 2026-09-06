@@ -1,5 +1,34 @@
 # Codex Change Log
 
+## 2026-08-24 - DRIVE: unified straight-drive balance (fixes drifting car)
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- The car drifted to one side in every straight-driving scenario
+  (open-loop equal PWM, obstacle-bypass straight segments, Mode B
+  off-line drive). Fixes:
+  - New `Car_DriveStraightBalance(BasePwm, Kp)`: encoder differential
+    balance (left fast -> left wheel slows) plus static trim; reused by
+    all open-line straight segments.
+  - Obstacle bypass X1/X2/WALL straight drives now use it instead of raw
+    `Car_SetSignedPWM(pwm, pwm)`.
+  - Mode B no-line straight drive now calls it too.
+  - New tunables: `CAR_STRAIGHT_PWM_TRIM` (static correction; +4..+8 if
+    the car always drifts right, negative if left) and
+    `CAR_STRAIGHT_BALANCE_KP` (0.6, used for obstacle bypass straight
+    drives; Mode B keeps `CAR_ENCODER_BALANCE_KP`).
+- Line-following balance logic untouched; if straight sections under line
+  following still visibly drift after trim tuning, a trim can be added to
+  the line-follow output the same way.
+
+Build/verification:
+- Reviewed in agent session (UTF-8 paren/brace 611/611, 287/287; no raw
+  equal-PWM open-loop drive remains); ARMCC build to be re-run in Keil.
+
 ## 2026-08-24 - OBST: Rewrite bypass state machine to user field procedure
 
 Branch: `feature/wall-follow-v1`

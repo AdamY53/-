@@ -9,13 +9,21 @@
 #include "Servo.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               31.0f
+#define CAR_BASE_PWM               32.0f
 #define CAR_LINE_KP                0.084f
 #define CAR_LINE_KD                0.064f
 #define CAR_ENCODER_BALANCE_KP     0.350f
 #define CAR_STEER_LIMIT            25.0f
 #define CAR_BALANCE_LIMIT          5.0f
-#define CAR_MIN_FORWARD_PWM        15.0f
+/* 直行修正参数：
+ * CAR_STRAIGHT_PWM_TRIM —— 静态补正(0=关)。左右轮机械/电机不一致时，
+ * 车会固定偏向一侧：车总向右偏 → 填 +4~+8；总向左偏 → 填负值。
+ * 作用：左轮+TRIM、右轮-TRIM（即给偏慢的一侧提速）。
+ * CAR_STRAIGHT_BALANCE_KP —— 直行段(绕障/无黑线直行)编码器差速平衡增益；
+ * 循迹段仍用上方 CAR_ENCODER_BALANCE_KP。若直行仍画S/偏，可整体调大。 */
+#define CAR_STRAIGHT_PWM_TRIM      0
+#define CAR_STRAIGHT_BALANCE_KP    0.6f
+#define CAR_MIN_FORWARD_PWM        20.0f
 #define CAR_PWM_LIMIT              60.0f
 
 /* 可调窗口：90度拐点需要连续确认的周期数（整数），每个周期约 10ms，数值越大越不容易误触发。 */
@@ -89,21 +97,21 @@
  *       无值时停稳→左转90°→停稳→直行找线,灰度≥LINE_MIN时停稳→右转
  *       90°回正→云台回正→交还正常循迹。所有“停稳”统一用
  *       CAR_OBST_STOP_TICKS 一个窗口调试。 */
-#define CAR_OBST_TRIGGER_CM          20   /* 前端触发阈值(cm) */
-#define CAR_OBST_CONFIRM_TIMES       2    /* 前端连续几次采样<阈值才触发 */
-#define CAR_OBST_STOP_TICKS          50   /* 统一停稳窗口(约0.5s) */
-#define CAR_OBST_DRIVE_PWM           24   /* 各直行段速度 */
-#define CAR_OBST_ENC_FIXED           400  /* 固定直走编码器值(OLED AVG同单位) */
+#define CAR_OBST_TRIGGER_CM          22   /* 前端触发阈值(cm) */
+#define CAR_OBST_CONFIRM_TIMES       1    /* 前端连续几次采样<阈值才触发 */
+#define CAR_OBST_STOP_TICKS          30   /* 统一停稳窗口(约0.5s) */
+#define CAR_OBST_DRIVE_PWM           30   /* 各直行段速度 */
+#define CAR_OBST_ENC_FIXED           500  /* 固定直走编码器值(OLED AVG同单位) */
 #define CAR_OBST_SIDE_DETECT_CM      60   /* 侧超声“有值”上限,大于此或无效=0 */
-#define CAR_OBST_GONE_CONFIRM        2    /* 无回波/归零的确认帧数 */
+#define CAR_OBST_GONE_CONFIRM        1    /* 无回波/归零的确认帧数 */
 #define CAR_OBST_LINE_CONFIRM        2    /* 灰度见线确认帧数 */
 #define CAR_OBST_X1_MAX_TICKS        200  /* 横移段超时(约2s) */
 #define CAR_OBST_WALL_MAX_TICKS      400  /* 贴壁直行超时(约4s) */
 #define CAR_OBST_FIND_MAX_TICKS      300  /* 找线超时(约3s) */
 #define CAR_OBST_LINE_MIN            3    /* 灰度几路亮=重新见线 */
 #define CAR_OBST_SERVO_FRONT         90   /* 舵机角度=正前(用户确认90°朝前) */
-#define CAR_OBST_SERVO_RIGHT         180  /* 舵机角度=朝右(实测标定) */
-#define CAR_OBST_SERVO_LEFT          0    /* 舵机角度=朝左(实测标定) */
+#define CAR_OBST_SERVO_RIGHT         0  /* 舵机角度=朝右(实测标定) */
+#define CAR_OBST_SERVO_LEFT          180    /* 舵机角度=朝左(实测标定) */
 
 /* 绕障子状态 */
 #define CAR_OBST_STATE_IDLE          0
@@ -378,6 +386,29 @@ static void Car_ResetEncoderTotals(void)
 	Turn_Entry_Right_Total = 0;
 	Turn_Forward_Count = 0;
 	Turn_Last_Forward_Count = 0;
+}
+
+/* 统一直行驱动器：编码器差速平衡 + 静态补正，输出两轮前向PWM。
+ * Balance：SpeedDiff=EncL-EncR，左轮快→Balance>0→左轮降速、右轮提速拉直。
+ * TRIM：左轮+TRIM、右轮-TRIM（静态校正固定偏向）。
+ * 用于绕障直行段与无黑线直行段；循迹段保持原逻辑叠加在纠偏上。 */
+static void Car_DriveStraightBalance(int16_t BasePwm, float Kp)
+{
+	int16_t SpeedDiff;
+	float Balance;
+	int16_t SpdL;
+	int16_t SpdR;
+
+	SpeedDiff = Encoder_Left - Encoder_Right;
+	Balance = (float)SpeedDiff * Kp;
+	Balance = LimitFloat(Balance, -CAR_BALANCE_LIMIT, CAR_BALANCE_LIMIT);
+	Encoder_Balance_PWM = (int8_t)Balance;
+
+	SpdL = (int16_t)((float)BasePwm - Balance) + CAR_STRAIGHT_PWM_TRIM;
+	SpdR = (int16_t)((float)BasePwm + Balance) - CAR_STRAIGHT_PWM_TRIM;
+	if (SpdL < 0) {SpdL = 0;}
+	if (SpdR < 0) {SpdR = 0;}
+	Car_SetSignedPWM(SpdL, SpdR);
 }
 
 static UltrasonicChannel_t Car_GetActiveUltrasonicSide(void)
@@ -876,10 +907,6 @@ static void Car_ModeBStartStraight(void)
 static uint8_t Car_ModeBRunEncoderStraight(uint8_t HasTarget, uint16_t TargetCount)
 {
 	int32_t ForwardDelta;
-	int16_t SpeedDiff;
-	float Balance;
-	float LeftPWM;
-	float RightPWM;
 
 	/* 无黑线直行时，不看灰度偏差，只用左右编码器速度差做修正。 */
 	ForwardDelta = ((Encoder_Left_Total - ModeB_Straight_Left_Total)
@@ -894,14 +921,8 @@ static uint8_t Car_ModeBRunEncoderStraight(uint8_t HasTarget, uint16_t TargetCou
 	}
 	ModeB_Straight_Count = (uint16_t)ForwardDelta;
 
-	SpeedDiff = Encoder_Left - Encoder_Right;
-	Balance = (float)SpeedDiff * CAR_ENCODER_BALANCE_KP;
-	Balance = LimitFloat(Balance, -CAR_BALANCE_LIMIT, CAR_BALANCE_LIMIT);
-	Encoder_Balance_PWM = (int8_t)Balance;
 	Line_Steer_PWM = 0;
-	LeftPWM = CAR_BASE_PWM - Balance;
-	RightPWM = CAR_BASE_PWM + Balance;
-	Car_SetForwardPWM(LeftPWM, RightPWM);
+	Car_DriveStraightBalance((int16_t)CAR_BASE_PWM, CAR_ENCODER_BALANCE_KP);
 
 	if (HasTarget
 	 && ((ModeB_Straight_Count + CAR_TURN_ENTRY_COUNT_WINDOW) >= TargetCount))
@@ -1461,7 +1482,7 @@ static void Car_RunObstNav(void)
 		{
 			Obst_Confirm2 = 0;
 		}
-		Car_SetSignedPWM(CAR_OBST_DRIVE_PWM, CAR_OBST_DRIVE_PWM);
+		Car_DriveStraightBalance(CAR_OBST_DRIVE_PWM, CAR_STRAIGHT_BALANCE_KP);
 		return;
 	}
 
@@ -1482,7 +1503,7 @@ static void Car_RunObstNav(void)
 			Obst_DoPivot(2u);            /* 回正(T2) */
 			return;
 		}
-		Car_SetSignedPWM(CAR_OBST_DRIVE_PWM, CAR_OBST_DRIVE_PWM);
+		Car_DriveStraightBalance(CAR_OBST_DRIVE_PWM, CAR_STRAIGHT_BALANCE_KP);
 		return;
 	}
 
@@ -1517,7 +1538,7 @@ static void Car_RunObstNav(void)
 		{
 			Obst_Confirm2 = 0;
 		}
-		Car_SetSignedPWM(CAR_OBST_DRIVE_PWM, CAR_OBST_DRIVE_PWM);
+		Car_DriveStraightBalance(CAR_OBST_DRIVE_PWM, CAR_STRAIGHT_BALANCE_KP);
 		return;
 	}
 
