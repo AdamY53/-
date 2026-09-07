@@ -23,7 +23,7 @@
  * 该值同时作用于：绕障直行段、模式B离线段、循迹直线输出。
  * CAR_STRAIGHT_BALANCE_KP —— 直行段(绕障/无黑线直行)编码器差速平衡增益；
  * 循迹段仍用上方 CAR_ENCODER_BALANCE_KP。若直行仍画S/偏，可整体调大。 */
-#define CAR_STRAIGHT_PWM_TRIM      2
+#define CAR_STRAIGHT_PWM_TRIM      1
 #define CAR_STRAIGHT_BALANCE_KP    0.6f
 #define CAR_MIN_FORWARD_PWM        23.0f
 #define CAR_PWM_LIMIT              58.0f
@@ -51,13 +51,13 @@
 /* 可调窗口：固定转弯时两个电机反方向差速 PWM，数值越大转弯越猛。 */
 #define CAR_FIXED_TURN_PWM           27
 /* 可调窗口：左转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_LEFT_TURN_LEFT_TARGET    (-440)
+#define CAR_LEFT_TURN_LEFT_TARGET    (-400)
 /* 可调窗口：左转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_LEFT_TURN_RIGHT_TARGET   720
+#define CAR_LEFT_TURN_RIGHT_TARGET   690
 /* 可调窗口：右转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_RIGHT_TURN_LEFT_TARGET   440
+#define CAR_RIGHT_TURN_LEFT_TARGET   400
 /* 可调窗口：右转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_RIGHT_TURN_RIGHT_TARGET  (-720)
+#define CAR_RIGHT_TURN_RIGHT_TARGET  (-690)
 /* 可调窗口：编码器未达到目标时的最大固定转弯周期数，每个周期约10ms。 */
 #define CAR_FIXED_TURN_MAX_TICKS     300
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，每个周期约 10ms，屏蔽期内不再次触发 90 度转弯。 */
@@ -117,20 +117,15 @@
  *       G2直行D2→停→T3(同T2方向)→停→G3直行(灰度见线即停,上限D3)→停→
  *       T4(同T1回正)→云台回正→交还循迹。
  * 每次动作(转/直行)间统一停稳 CAR_OBST_STOP_TICKS。 */
-#define CAR_OBST_TRIGGER_CM          25   /* 前端触发阈值(cm) */
-/* 模式C按“行驶圈向”取避障绕向(左右转)：
- * 顺圈(A→B→C→D→A)用 CAR_OBST_C_DEFAULT_TURN(左绕/逆时针)；
- * 逆圈(反向行驶)避障转弯取镜面反射方向(右绕)。
- * CAR_OBST_C_ROUTE_DIR: 0=顺圈 1=逆圈(手动/宏选择，实车按起始方向改)。 */
-#define CAR_OBST_C_ROUTE_DIR         0
-#define CAR_OBST_C_DEFAULT_TURN     CAR_TURN_LEFT   /* 顺圈绕向(左绕用右超声) */
-#define CAR_OBST_CONFIRM_TIMES       2   /* 前端连续几次采样<阈值才触发 */
+#define CAR_OBST_TRIGGER_CM          23   /* 前端触发阈值(cm) */
+#define CAR_OBST_C_DEFAULT_TURN     CAR_TURN_LEFT   /* 模式C(自由避障)默认绕向: 左绕用右超声 */
+#define CAR_OBST_CONFIRM_TIMES       1  /* 前端连续几次采样<阈值才触发 */
 #define CAR_OBST_STOP_TICKS          30   /* 统一停稳窗口(约0.5s) */
 #define CAR_OBST_DRIVE_PWM           30   /* 各直行段速度 */
 /* C盲走三段固定直行(单位=OLED AVG,70计数≈1cm)——用户按实车标定改:
  * D1第一次转后让开木块的距离; D2沿原方向越过木块; D3转回线方向后见线上限 */
 #define CAR_OBST_D1_AVG              1200
-#define CAR_OBST_D2_AVG              2800
+#define CAR_OBST_D2_AVG              2200
 #define CAR_OBST_D3_AVG              1400
 #define CAR_OBST_G_MAX_TICKS         400   /* 单盲走直行段超时(约4s) */
 #define CAR_OBST_LINE_CONFIRM        2    /* 灰度见线确认帧数 */
@@ -1594,10 +1589,8 @@ static void Obst_BeginBlock(void)
 
 	if (Work_Mode == CAR_WORK_MODE_C)
 	{
-		/* 模式C：按行驶圈向取绕向——顺圈用默认(左绕)，逆圈取镜面(右绕) */
-		Obst_TurnDir = (CAR_OBST_C_ROUTE_DIR == 0)
-		            ? CAR_OBST_C_DEFAULT_TURN
-		            : Obst_OppDir(CAR_OBST_C_DEFAULT_TURN);
+		/* 模式C(自由避障)：按固定默认绕向 */
+		Obst_TurnDir = CAR_OBST_C_DEFAULT_TURN;
 		Obst_SideChan = (Obst_TurnDir == CAR_TURN_LEFT) ? US_CH_RIGHT : US_CH_LEFT;
 		Servo_SetAngle((Obst_TurnDir == CAR_TURN_LEFT)
 		             ? CAR_OBST_SERVO_RIGHT : CAR_OBST_SERVO_LEFT);
@@ -1952,8 +1945,15 @@ static void OLED_ShowTrackPage(void)
 	{
 		if (Work_Mode == CAR_WORK_MODE_C)
 		{
-			/* 模式C：自由循迹+避障，不跑路段 */
-			OLED_ShowString(0, 32, "MODE:C   ", OLED_8X16);
+			/* 模式C：自由循迹+避障。行32 显示模式+圈向(顺CW/逆CCW)，行48 状态 */
+			if (CAR_OBST_C_ROUTE_DIR == 0)
+			{
+				OLED_ShowString(0, 32, "MODE:C CW ", OLED_8X16);
+			}
+			else
+			{
+				OLED_ShowString(0, 32, "MODE:C CCW", OLED_8X16);
+			}
 			OLED_ShowString(0, 48, "FREERUN", OLED_8X16);
 		}
 		else
