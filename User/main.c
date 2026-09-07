@@ -118,15 +118,20 @@
  *       T4(同T1回正)→云台回正→交还循迹。
  * 每次动作(转/直行)间统一停稳 CAR_OBST_STOP_TICKS。 */
 #define CAR_OBST_TRIGGER_CM          25   /* 前端触发阈值(cm) */
-#define CAR_OBST_C_DEFAULT_TURN     CAR_TURN_LEFT   /* 模式C(自由避障)默认绕向: 左绕用右超声 */
-#define CAR_OBST_CONFIRM_TIMES       1    /* 前端连续几次采样<阈值才触发 */
+/* 模式C按“行驶圈向”取避障绕向(左右转)：
+ * 顺圈(A→B→C→D→A)用 CAR_OBST_C_DEFAULT_TURN(左绕/逆时针)；
+ * 逆圈(反向行驶)避障转弯取镜面反射方向(右绕)。
+ * CAR_OBST_C_ROUTE_DIR: 0=顺圈 1=逆圈(手动/宏选择，实车按起始方向改)。 */
+#define CAR_OBST_C_ROUTE_DIR         0
+#define CAR_OBST_C_DEFAULT_TURN     CAR_TURN_LEFT   /* 顺圈绕向(左绕用右超声) */
+#define CAR_OBST_CONFIRM_TIMES       2   /* 前端连续几次采样<阈值才触发 */
 #define CAR_OBST_STOP_TICKS          30   /* 统一停稳窗口(约0.5s) */
 #define CAR_OBST_DRIVE_PWM           30   /* 各直行段速度 */
 /* C盲走三段固定直行(单位=OLED AVG,70计数≈1cm)——用户按实车标定改:
  * D1第一次转后让开木块的距离; D2沿原方向越过木块; D3转回线方向后见线上限 */
-#define CAR_OBST_D1_AVG              1050
-#define CAR_OBST_D2_AVG              2100
-#define CAR_OBST_D3_AVG              700
+#define CAR_OBST_D1_AVG              1200
+#define CAR_OBST_D2_AVG              2800
+#define CAR_OBST_D3_AVG              1400
 #define CAR_OBST_G_MAX_TICKS         400   /* 单盲走直行段超时(约4s) */
 #define CAR_OBST_LINE_CONFIRM        2    /* 灰度见线确认帧数 */
 #define CAR_OBST_LINE_MIN            3    /* 灰度几路亮=重新见线 */
@@ -1589,8 +1594,10 @@ static void Obst_BeginBlock(void)
 
 	if (Work_Mode == CAR_WORK_MODE_C)
 	{
-		/* 模式C(自由避障)：按固定默认绕向 */
-		Obst_TurnDir = CAR_OBST_C_DEFAULT_TURN;
+		/* 模式C：按行驶圈向取绕向——顺圈用默认(左绕)，逆圈取镜面(右绕) */
+		Obst_TurnDir = (CAR_OBST_C_ROUTE_DIR == 0)
+		            ? CAR_OBST_C_DEFAULT_TURN
+		            : Obst_OppDir(CAR_OBST_C_DEFAULT_TURN);
 		Obst_SideChan = (Obst_TurnDir == CAR_TURN_LEFT) ? US_CH_RIGHT : US_CH_LEFT;
 		Servo_SetAngle((Obst_TurnDir == CAR_TURN_LEFT)
 		             ? CAR_OBST_SERVO_RIGHT : CAR_OBST_SERVO_LEFT);
