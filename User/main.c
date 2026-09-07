@@ -40,7 +40,7 @@
  * 注意：太大(如300≈4.3cm在部分弯口仍可能冲过)会表现为不转；建议从
  * 约100(~1.5cm)起步逐步加，直到“刚好走到想转的位置”。
  * 零前冲的场合(障碍绕障、模式B停稳后转向)不走本宏。 */
-#define CAR_TURN_ENTRY_FORWARD_COUNT 300
+#define CAR_TURN_ENTRY_FORWARD_COUNT 280
 /* 可调窗口：前进累计值到目标前的允许误差，数值越大越早进入转弯。 */
 #define CAR_TURN_ENTRY_COUNT_WINDOW  8
 /* 可调窗口：编码器异常时最大前探周期数，每个周期约 10ms，防止一直前进。 */
@@ -61,7 +61,7 @@
 /* 可调窗口：编码器未达到目标时的最大固定转弯周期数，每个周期约10ms。 */
 #define CAR_FIXED_TURN_MAX_TICKS     300
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，每个周期约 10ms，屏蔽期内不再次触发 90 度转弯。 */
-#define CAR_TURN_COOLDOWN_TICKS      24
+#define CAR_TURN_COOLDOWN_TICKS      25
 
 /* ===== 路程漏转保险（A/B 模式）=====
  * 目的：灰度漏检某个 90° 路口时，按路程 AVG 兜底强制做动作，防止冲线。
@@ -99,8 +99,8 @@
 /* 可调窗口：超声波采样间隔，每个周期约10ms；前方和当前外侧模块轮流采样。 */
 #define CAR_ULTRASONIC_SAMPLE_TICKS  5
 /* 可调窗口：外围物块认定范围，单位厘米。 */
-#define CAR_OBJECT_MIN_CM            23
-#define CAR_OBJECT_MAX_CM            35
+#define CAR_OBJECT_MIN_CM            15
+#define CAR_OBJECT_MAX_CM            45
 /* 可调窗口：物块离开范围的释放阈值，留出滞回避免边界抖动重复计数。 */
 #define CAR_OBJECT_RELEASE_CM        45
 /* 可调窗口：连续多少次进入20~40cm才计为发现一个物块。 */
@@ -173,6 +173,7 @@
 #define CAR_MODE_B_STATE_STOP_O          5
 #define CAR_MODE_B_STATE_REJOIN_TURN     6
 #define CAR_MODE_B_STATE_AFTER_REJOIN    7
+#define CAR_MODE_B_STATE_REJOIN_DONE     8   /* B盲行结束(重新见线回正后)停车终态 */
 
 #define CAR_ROUTE_MODE_COUNT        8
 #define CAR_ROUTE_SEGMENT_COUNT     4
@@ -1364,6 +1365,14 @@ static void Car_RunModeBNav(void)
 	if (ModeB_State == CAR_MODE_B_STATE_REJOIN_TURN)
 	{
 		Car_RunSharpTurn();
+		return;
+	}
+
+	if (ModeB_State == CAR_MODE_B_STATE_REJOIN_DONE)
+	{
+		/* B盲行结束：停车等待人工干预，不再回到循迹 */
+		Car_Stop();
+		Line_Mode = 'S';
 	}
 }
 
@@ -1386,8 +1395,10 @@ static void Car_FinishSharpTurn(void)
 	}
 	if (ModeB_State == CAR_MODE_B_STATE_REJOIN_TURN)
 	{
-		ModeB_State = CAR_MODE_B_STATE_AFTER_REJOIN;
+		/* B盲行结束：重新识别黑线并回正后停车(不进循迹) */
+		ModeB_State = CAR_MODE_B_STATE_REJOIN_DONE;
 		Route_SegmentTurnCount = 0;
+		Car_Stop();
 		return;
 	}
 
