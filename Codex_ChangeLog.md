@@ -1,5 +1,35 @@
 # Codex ChangeLog
 
+## 2026-08-24 - MODE B/C: B stops after blind rejoin; C rewritten to blind AVG run
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+
+What changed:
+- Mode B: after the blind (no-line) drive re-detects the black line and
+  does the rejoin turn, the car now STOPS (`CAR_MODE_B_STATE_REJOIN_DONE`,
+  RunModeBNav stops and holds) instead of continuing normal tracking.
+- Mode C obstacle bypass rewritten to a blind fixed-AVG run (ultrasonic
+  only used at trigger and D3 line-detection):
+  stop -> T1(90, bypass side) -> settle -> G1 drive CAR_OBST_D1_AVG ->
+  settle -> T2(opposite, back to heading) -> settle -> G2 drive
+  CAR_OBST_D2_AVG -> settle -> T3(same as T2) -> settle -> G3 drive
+  (grayscale line sight stops early, CAR_OBST_D3_AVG is the cap) -> settle
+  -> T4(back to heading) -> hand back to tracking. All settles use
+  CAR_OBST_STOP_TICKS. Directions: seq 1/4 = bypass side,
+  seq 2/3 = opposite. Old X1/X2/WALL/FIND ultrasonic phases and their
+  macros/helpers were removed.
+- D1/D2/D3 defaults 1050/2100/700 AVG (~15/30/10 cm at 70 counts/cm);
+  tune the macros on the car.
+- Restored user values after an accidental checkout: CAR_STRAIGHT_PWM_TRIM=1,
+  CAR_MB_* blind-turn targets -410/690/410/-690.
+
+Build/verification:
+- Reviewed (UTF-8 paren/brace 781/781, 317/317); ARMCC build to be
+  re-run in Keil.
+
 ## 2026-08-24 - ARCH: mode roles split A/B/C, mode A laps forever
 
 Branch: `feature/wall-follow-v1`
