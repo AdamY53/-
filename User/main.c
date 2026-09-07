@@ -9,9 +9,9 @@
 #include "Servo.h"
 
 /* Line tracking tuning. Normal tracking keeps both motors forward. */
-#define CAR_BASE_PWM               32.0f
-#define CAR_LINE_KP                0.065f
-#define CAR_LINE_KD                0.053f
+#define CAR_BASE_PWM               31.0f
+#define CAR_LINE_KP                0.060f
+#define CAR_LINE_KD                0.035f
 #define CAR_ENCODER_BALANCE_KP     0.350f
 #define CAR_STEER_LIMIT            30.0f
 #define CAR_BALANCE_LIMIT          5.0f
@@ -53,11 +53,11 @@
 /* 可调窗口：左转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
 #define CAR_LEFT_TURN_LEFT_TARGET    (-440)
 /* 可调窗口：左转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_LEFT_TURN_RIGHT_TARGET   730
+#define CAR_LEFT_TURN_RIGHT_TARGET   720
 /* 可调窗口：右转时左轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
 #define CAR_RIGHT_TURN_LEFT_TARGET   440
 /* 可调窗口：右转时右轮的编码器目标值，单位和OLED第五行L/R累计值相同。 */
-#define CAR_RIGHT_TURN_RIGHT_TARGET  (-730)
+#define CAR_RIGHT_TURN_RIGHT_TARGET  (-720)
 /* 可调窗口：编码器未达到目标时的最大固定转弯周期数，每个周期约10ms。 */
 #define CAR_FIXED_TURN_MAX_TICKS     300
 /* 可调窗口：每次完成 90 度转弯后的屏蔽周期数，每个周期约 10ms，屏蔽期内不再次触发 90 度转弯。 */
@@ -82,7 +82,13 @@
 /* 可调窗口：其他普通路段到达目标点需要经过的 T 数量。 */
 #define CAR_ROUTE_NORMAL_T_COUNT     1
 /* 可调窗口：模式B中，第一个特殊 T 后直行到 Q 点附近的编码器平均累计值，单位和 OLED 的 AVG 一样。 */
-#define CAR_MODE_B_Q_FORWARD_COUNT   2130
+#define CAR_MODE_B_Q_FORWARD_COUNT   2030
+/* 模式B盲走阶段的90°转使用独立的一套左右轮编码器目标(与普通循迹转弯分开标定)：
+ * 盲走去Q转向、重新见线回正等都在无黑线段，角度标定与地图90°不同。 */
+#define CAR_MB_LEFT_TURN_LEFT_TARGET   (-440)  /* B盲走：左转时左轮目标 */
+#define CAR_MB_LEFT_TURN_RIGHT_TARGET  730     /* B盲走：左转时右轮目标 */
+#define CAR_MB_RIGHT_TURN_LEFT_TARGET  440     /* B盲走：右转时左轮目标 */
+#define CAR_MB_RIGHT_TURN_RIGHT_TARGET (-730)  /* B盲走：右转时右轮目标 */
 /* 可调窗口：模式B中到 Q/O 点后的停稳时间，每个周期约 10ms，50=约0.5秒。 */
 #define CAR_MODE_B_STOP_TICKS        50
 /* 可调窗口：模式B中，无黑线直行后看到多少路灰度为高电平才认为重新遇到黑线。 */
@@ -837,6 +843,21 @@ static void Car_LoadTurnEncoderTargets(uint8_t Direction)
 	}
 }
 
+/* 模式B盲走阶段专用：独立一套90°转的左右轮目标 */
+static void Car_LoadModeBTurnTargets(uint8_t Direction)
+{
+	if (Direction == CAR_TURN_LEFT)
+	{
+		Turn_Left_Encoder_Target = CAR_MB_LEFT_TURN_LEFT_TARGET;
+		Turn_Right_Encoder_Target = CAR_MB_LEFT_TURN_RIGHT_TARGET;
+	}
+	else
+	{
+		Turn_Left_Encoder_Target = CAR_MB_RIGHT_TURN_LEFT_TARGET;
+		Turn_Right_Encoder_Target = CAR_MB_RIGHT_TURN_RIGHT_TARGET;
+	}
+}
+
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 {
 	int16_t LeftPWM;
@@ -1040,7 +1061,7 @@ static void Car_ModeBStartEncoderTurn(uint8_t Direction)
 	Turn_Forward_Count = 0;
 	Turn_Left_Encoder_Count = 0;
 	Turn_Right_Encoder_Count = 0;
-	Car_LoadTurnEncoderTargets(Direction);
+	Car_LoadModeBTurnTargets(Direction);   /* B盲走用独立一套90°目标 */
 	Turn_Left_Encoder_Reached = Car_IsTurnEncoderTargetReached(0, Turn_Left_Encoder_Target);
 	Turn_Right_Encoder_Reached = Car_IsTurnEncoderTargetReached(0, Turn_Right_Encoder_Target);
 	Line_Mode = (Direction == CAR_TURN_LEFT) ? 'L' : 'R';
@@ -1089,8 +1110,8 @@ static uint8_t Ins_IsFwdNormalStep(const CAR_ROUTE_STEP *S)
  *   1710 / 3720 / 3420 / 3420 / 1710 */
 static uint32_t Ins_GetValue(const CAR_ROUTE_STEP *S, uint8_t Idx)
 {
-	static const uint32_t InsAdVals[5] = {1968UL, 3420UL, 3720UL, 3720UL, 1968UL};
-	static const uint32_t InsDaVals[5] = {1710UL, 3720UL, 3420UL, 3420UL, 1710UL};
+	static const uint32_t InsAdVals[5] = {1968UL, 3520UL, 3820UL, 3820UL, 1968UL};
+	static const uint32_t InsDaVals[5] = {1710UL, 3820UL, 3520UL, 3520UL, 1710UL};
 
 	if (Ins_IsFwdNormalStep(S))
 	{
