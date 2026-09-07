@@ -118,6 +118,9 @@
  *       T4(同T1回正)→云台回正→交还循迹。
  * 每次动作(转/直行)间统一停稳 CAR_OBST_STOP_TICKS。 */
 #define CAR_OBST_TRIGGER_CM          23   /* 前端触发阈值(cm) */
+/* 模式C按“行驶圈向”取避障绕向：0=顺圈(A→B→C→D→A)用CAR_OBST_C_DEFAULT_TURN；
+ * 1=逆圈(反向行驶)避障转弯取镜面反射方向。 */
+#define CAR_OBST_C_ROUTE_DIR         0
 #define CAR_OBST_C_DEFAULT_TURN     CAR_TURN_LEFT   /* 模式C(自由避障)默认绕向: 左绕用右超声 */
 #define CAR_OBST_CONFIRM_TIMES       1  /* 前端连续几次采样<阈值才触发 */
 #define CAR_OBST_STOP_TICKS          30   /* 统一停稳窗口(约0.5s) */
@@ -266,9 +269,8 @@ static uint8_t Obst_TurnSeq = 0;         /* 当前第几次90°(1..4) */
 static uint8_t Obst_TurnDir = CAR_TURN_LEFT;   /* 第1/4次转向方向=绕向 */
 static UltrasonicChannel_t Obst_SideChan = US_CH_RIGHT; /* 贴壁侧固定超声 */
 static uint8_t Obst_Tick = 0;            /* 段内计时 */
-static uint8_t Obst_AfterWait = 0;       /* WAIT结束动作 0=进WALL 1=进FIND 2=执行第3次转 3=执行第4次转 */
-static uint8_t Obst_Confirm2 = 0;        /* 段内防抖计数(无回波/见线/判零) */
-static uint8_t Obst_SideSeen = 0;        /* WALL段:侧超声是否已见过有值 */
+static uint8_t Obst_AfterWait = 0;       /* WAIT结束动作 0/1/2=进G1/G2/G3 3/4/5=执行第2/3/4次转 */
+static uint8_t Obst_Confirm2 = 0;        /* 段内防抖计数(G3见线) */
 static int32_t Obst_EntryLeftTotal = 0;  /* 编码器直行段起点 */
 static int32_t Obst_EntryRightTotal = 0;
 
@@ -1573,7 +1575,6 @@ static void Obst_ResetNav(void)
 	Obst_Ready = 0;
 	Obst_Tick = 0;
 	Obst_Confirm2 = 0;
-	Obst_SideSeen = 0;
 }
 
 /* 触发绕行：按当前路线方向定绕向/贴壁侧，停车并让云台预转 */
@@ -1583,14 +1584,15 @@ static void Obst_BeginBlock(void)
 	Obst_Ready = 0;
 	Obst_Tick = 0;
 	Obst_Confirm2 = 0;
-	Obst_SideSeen = 0;
 	Obst_EntryLeftTotal = Encoder_Left_Total;
 	Obst_EntryRightTotal = Encoder_Right_Total;
 
 	if (Work_Mode == CAR_WORK_MODE_C)
 	{
-		/* 模式C(自由避障)：按固定默认绕向 */
-		Obst_TurnDir = CAR_OBST_C_DEFAULT_TURN;
+		/* 模式C：按行驶圈向取绕向——顺圈用默认(左绕)，逆圈取镜面(右绕) */
+		Obst_TurnDir = (CAR_OBST_C_ROUTE_DIR == 0)
+		            ? CAR_OBST_C_DEFAULT_TURN
+		            : Obst_OppDir(CAR_OBST_C_DEFAULT_TURN);
 		Obst_SideChan = (Obst_TurnDir == CAR_TURN_LEFT) ? US_CH_RIGHT : US_CH_LEFT;
 		Servo_SetAngle((Obst_TurnDir == CAR_TURN_LEFT)
 		             ? CAR_OBST_SERVO_RIGHT : CAR_OBST_SERVO_LEFT);
@@ -1922,6 +1924,12 @@ static void OLED_ShowTrackPage(void)
 {
 	const CAR_ROUTE_STEP *Step;
 	int32_t AvgEncoderTotal;
+
+	/* 调试保留变量：各控制函数在写，此处显式读取避免“set but never used”告警 */
+	(void)Line_Mode;
+	(void)Line_Steer_PWM;
+	(void)Encoder_Balance_PWM;
+	(void)Turn_Last_Forward_Count;
 
 	Step = &Car_RouteMap[Route_SelectedMode][(Route_CurrentSegment < CAR_ROUTE_SEGMENT_COUNT) ? Route_CurrentSegment : (CAR_ROUTE_SEGMENT_COUNT - 1u)];
 	AvgEncoderTotal = (Encoder_Left_Total + Encoder_Right_Total) / 2;
