@@ -1,5 +1,35 @@
 # Codex ChangeLog
 
+## 2026-08-24 - MODE A: first-lap result page (per-segment + total + blocks), frozen OLED
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+- `Codex_ChangeLog.md`
+
+What changed:
+- New OLED page `CAR_DISPLAY_PAGE_RESULT` (4th page, K2 cycles to it in mode A only).
+- When mode A finishes lap 1 (returns to start and starts lap 2), the four
+  per-segment times, the total lap time, the block count, and the route mode
+  are snapshotted (`Car_SnapshotLapResult` in `Car_AdvanceRouteSegment` when
+  `Lap_Count == 0`).
+- OLED auto-switches to the result page and FREEZES it (`Lap_Result_Frozen`):
+  the page keeps showing lap-1 numbers while the car keeps looping; K2 page
+  changes are ignored while frozen.
+- Pressing K1 (stop) releases the freeze but keeps the data (K2 can return to
+  the RESULT page). Pressing K1 again (start a new run) clears the snapshot
+  and returns to the live Track page.
+- Switching work modes (K3 long press) also clears the snapshot/page state.
+- User confirmed current working-tree C-mode obstacle macros stay as-is:
+  CAR_OBST_D1_AVG=1200, D2_AVG=2000, D3_AVG=2000, LINE_MIN=4 (committed
+  together with this feature).
+
+Build/verification:
+- Reviewed (UTF-8 paren/brace 842/842, 332/332 balanced); ARMCC build to be
+  confirmed by the user in Keil.
+
+
 ## 2026-08-24 - MODE B/C: B stops after blind rejoin; C rewritten to blind AVG run
 
 Branch: `feature/wall-follow-v1`

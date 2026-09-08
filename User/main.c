@@ -128,12 +128,12 @@
 #define CAR_OBST_DRIVE_PWM           30   /* 各直行段速度 */
 /* C盲走三段固定直行(单位=OLED AVG,70计数≈1cm)——用户按实车标定改:
  * D1第一次转后让开木块的距离; D2沿原方向越过木块; D3转回线方向后见线上限 */
-#define CAR_OBST_D1_AVG              1000
+#define CAR_OBST_D1_AVG              1200
 #define CAR_OBST_D2_AVG              2000
-#define CAR_OBST_D3_AVG              1000
+#define CAR_OBST_D3_AVG              2000
 #define CAR_OBST_G_MAX_TICKS         400   /* 单盲走直行段超时(约4s) */
 #define CAR_OBST_LINE_CONFIRM        2    /* 灰度见线确认帧数 */
-#define CAR_OBST_LINE_MIN            3    /* 灰度几路亮=重新见线 */
+#define CAR_OBST_LINE_MIN            4    /* 灰度几路亮=重新见线 */
 #define CAR_OBST_SERVO_FRONT         90   /* 舵机角度=正前(用户确认90°朝前) */
 #define CAR_OBST_SERVO_RIGHT         0  /* 舵机角度=朝右(实测标定) */
 #define CAR_OBST_SERVO_LEFT          180    /* 舵机角度=朝左(实测标定) */
@@ -159,6 +159,7 @@
 #define CAR_DISPLAY_PAGE_TRACK      0
 #define CAR_DISPLAY_PAGE_ROUTE      1
 #define CAR_DISPLAY_PAGE_INSURANCE  2   /* 漏转保险调试页(K2 循环切到) */
+#define CAR_DISPLAY_PAGE_RESULT     3   /* 模式A第一圈综合成绩页(用时+物块), 冻结保存 */
 
 #define CAR_WORK_MODE_A             0   /* 基本要求1+3: 循迹+分段计时+外围物块计数(无限循环) */
 #define CAR_WORK_MODE_B             1   /* 基本要求2: 定点导航 Q/O */
@@ -248,6 +249,12 @@ static int32_t Ins_BaseAvg = 0;            /* 保险窗口起点AVG(上次固定
 
 static uint8_t Work_Mode = CAR_WORK_MODE_A;
 static uint16_t Lap_Count = 0;               /* 模式A已完成圈数(无限循环用) */
+static uint32_t Lap_Result_SegmentMs[CAR_ROUTE_SEGMENT_COUNT] = {0};  /* 第一圈各段用时快照 */
+static uint32_t Lap_Result_TotalMs = 0;      /* 第一圈总用时快照 */
+static uint8_t Lap_Result_ObjectCount = 0;   /* 第一圈物块数快照 */
+static uint8_t Lap_Result_RouteMode = 0;     /* 成绩快照对应的路线号(显示段名用) */
+static uint8_t Lap_Result_Ready = 0;         /* 已有第一圈成绩数据(停车后仍可翻页查看) */
+static uint8_t Lap_Result_Frozen = 0;        /* OLED定格在成绩页(K2失效), 按K1解除 */
 static uint8_t ModeB_State = CAR_MODE_B_STATE_IDLE;
 static uint16_t ModeB_Stop_Tick = 0;
 static int32_t ModeB_Straight_Left_Total = 0;
@@ -699,6 +706,26 @@ static void Car_CloseRouteSegment(void)
 	Route_SegmentWaiting = 1;
 }
 
+/* 模式A第一圈结束(回到出发点)时快照成绩并冻结OLED到综合成绩页。
+ * 只做一次：此后无限循环跑圈不再刷新，画面保持第一圈成绩，直到按K1。 */
+static void Car_SnapshotLapResult(void)
+{
+	uint8_t i;
+	uint32_t Total = 0;
+
+	for (i = 0; i < CAR_ROUTE_SEGMENT_COUNT; i++)
+	{
+		Lap_Result_SegmentMs[i] = Route_SegmentMs[i];
+		Total += Route_SegmentMs[i];
+	}
+	Lap_Result_TotalMs = Total;
+	Lap_Result_ObjectCount = Object_Count;
+	Lap_Result_RouteMode = Route_SelectedMode;
+	Lap_Result_Ready = 1;
+	Lap_Result_Frozen = 1;
+	OLED_Page = CAR_DISPLAY_PAGE_RESULT;
+}
+
 static void Car_AdvanceRouteSegment(void)
 {
 	if (!Route_SegmentWaiting || Route_Done)
@@ -720,7 +747,12 @@ static void Car_AdvanceRouteSegment(void)
 		if ((Work_Mode == CAR_WORK_MODE_A) && Car_Running)
 		{
 			/* 模式A：跑完一圈(回到出发点)自动进入下一圈；
-			 * 保险/计时持续，物块计数只在第一圈(Lap_Count==0)进行，之后保存显示。 */
+			 * 保险/计时持续，物块计数只在第一圈(Lap_Count==0)进行，之后保存显示。
+			 * 第一圈刚结束时(Route_SegmentMs里还是第一圈的4段时间)先定格成绩页。 */
+			if (Lap_Count == 0)
+			{
+				Car_SnapshotLapResult();
+			}
 			Lap_Count++;
 			Route_CurrentSegment = 0;
 			Route_Active = 1;
@@ -809,6 +841,9 @@ static void Car_ToggleWorkMode(void)
 		Work_Mode = CAR_WORK_MODE_A;
 	}
 	Lap_Count = 0;
+	Lap_Result_Ready = 0;
+	Lap_Result_Frozen = 0;
+	OLED_Page = CAR_DISPLAY_PAGE_TRACK;
 	Obst_ResetNav();
 	Servo_SetAngle(CAR_OBST_SERVO_FRONT);
 	Car_ResetLineController();
@@ -2039,6 +2074,39 @@ static void OLED_ShowRoutePage(void)
 	OLED_Update();
 }
 
+/* 模式A综合成绩页：第一圈各段用时+总用时+物块数。
+ * 数据来自第一圈结束时的快照，无限循环跑圈时不再刷新(定格)。 */
+static void OLED_ShowResultPage(void)
+{
+	uint8_t i;
+	uint32_t Ms;
+	uint32_t Sec;
+	uint32_t Centi;
+	const CAR_ROUTE_STEP *Step;
+
+	OLED_Clear();
+	if (!Lap_Result_Ready)
+	{
+		OLED_ShowString(0, 24, "NO RESULT", OLED_8X16);
+		OLED_Update();
+		return;
+	}
+
+	for (i = 0; i < CAR_ROUTE_SEGMENT_COUNT; i++)
+	{
+		Step = &Car_RouteMap[Lap_Result_RouteMode][i];
+		Ms = Lap_Result_SegmentMs[i];
+		Car_MsToDisplayTime(Ms, &Sec, &Centi);
+		OLED_Printf(0, (int16_t)(i * 10u), OLED_6X8, "%c-%c:%02lu.%02luS",
+		            Step->From, Step->To, (unsigned long)Sec, (unsigned long)Centi);
+	}
+	Car_MsToDisplayTime(Lap_Result_TotalMs, &Sec, &Centi);
+	OLED_Printf(0, 40, OLED_6X8, "TOT:%02lu.%02luS",
+	            (unsigned long)Sec, (unsigned long)Centi);
+	OLED_Printf(0, 50, OLED_6X8, "OBJ:%u", (unsigned int)Lap_Result_ObjectCount);
+	OLED_Update();
+}
+
 /* 保险调试页：S=当前段From-To #窗口序号+方向；
  * U=本窗口已累计AVG(自上次固定动作完成)；V=窗口保险值；L=还差多少触发(<=0=会触发) */
 static void OLED_ShowInsurancePage(void)
@@ -2072,7 +2140,19 @@ static void OLED_ShowInsurancePage(void)
 
 static void OLED_Task(void)
 {
-	if (OLED_Page == CAR_DISPLAY_PAGE_ROUTE)
+	/* 模式A第一圈结束后的成绩定格：无视当前页强制显示成绩页，
+	 * 直到按下 K1 解除冻结。 */
+	if (Lap_Result_Frozen)
+	{
+		OLED_ShowResultPage();
+		return;
+	}
+
+	if (OLED_Page == CAR_DISPLAY_PAGE_RESULT)
+	{
+		OLED_ShowResultPage();
+	}
+	else if (OLED_Page == CAR_DISPLAY_PAGE_ROUTE)
 	{
 		OLED_ShowRoutePage();
 	}
@@ -2108,6 +2188,10 @@ static void Key_Task(void)
 		Car_ResetLineController();
 		if (Car_Running)
 		{
+			/* 新一轮启动：清掉上一轮定格的第一圈成绩，界面回 Track 实时页 */
+			Lap_Result_Ready = 0;
+			Lap_Result_Frozen = 0;
+			OLED_Page = CAR_DISPLAY_PAGE_TRACK;
 			Car_ResetEncoderTotals();
 			if (Work_Mode != CAR_WORK_MODE_C)
 			{
@@ -2119,6 +2203,8 @@ static void Key_Task(void)
 		}
 		if (!Car_Running)
 		{
+			/* 停车：解除成绩页强制定格(数据保留，K2 可翻回 RESULT 页查看) */
+			Lap_Result_Frozen = 0;
 			Car_Stop();
 			if (Work_Mode != CAR_WORK_MODE_C)
 			{
@@ -2128,8 +2214,19 @@ static void Key_Task(void)
 	}
 	else if (KeyNum == KEY_NUM_K2)
 	{
-		/* 三页循环：Track(循迹) → Route(计时) → INS(保险调试) */
-		OLED_Page = (uint8_t)((OLED_Page + 1u) % 3u);
+		/* 页循环：Track→Route→INS，模式A另有 RESULT(第一圈成绩) 第4页。
+		 * 成绩定格期间不响应翻页，保持画面不动。 */
+		if (!Lap_Result_Frozen)
+		{
+			if (Work_Mode == CAR_WORK_MODE_A)
+			{
+				OLED_Page = (uint8_t)((OLED_Page + 1u) % 4u);
+			}
+			else
+			{
+				OLED_Page = (uint8_t)((OLED_Page + 1u) % 3u);
+			}
+		}
 	}
 	else if (KeyNum == KEY_NUM_K3)
 	{
