@@ -85,10 +85,10 @@
 #define CAR_MODE_B_Q_FORWARD_COUNT   2000
 /* 模式B盲走阶段的90°转使用独立的一套左右轮编码器目标(与普通循迹转弯分开标定)：
  * 盲走去Q转向、重新见线回正等都在无黑线段，角度标定与地图90°不同。 */
-#define CAR_MB_LEFT_TURN_LEFT_TARGET   (-400)  /* B盲走：左转时左轮目标 */
-#define CAR_MB_LEFT_TURN_RIGHT_TARGET  690     /* B盲走：左转时右轮目标 */
-#define CAR_MB_RIGHT_TURN_LEFT_TARGET  400     /* B盲走：右转时左轮目标 */
-#define CAR_MB_RIGHT_TURN_RIGHT_TARGET (-690)  /* B盲走：右转时右轮目标 */
+#define CAR_MB_LEFT_TURN_LEFT_TARGET   (-420)  /* B盲走：左转时左轮目标 */
+#define CAR_MB_LEFT_TURN_RIGHT_TARGET  700     /* B盲走：左转时右轮目标 */
+#define CAR_MB_RIGHT_TURN_LEFT_TARGET  420     /* B盲走：右转时左轮目标 */
+#define CAR_MB_RIGHT_TURN_RIGHT_TARGET (-700)  /* B盲走：右转时右轮目标 */
 /* 可调窗口：模式B中到 Q/O 点后的停稳时间，每个周期约 10ms，50=约0.5秒。 */
 #define CAR_MODE_B_STOP_TICKS        50
 /* 可调窗口：模式B中，无黑线直行后看到多少路灰度为高电平才认为重新遇到黑线。 */
@@ -117,23 +117,36 @@
  *       G2直行D2→停→T3(同T2方向)→停→G3直行(灰度见线即停,上限D3)→停→
  *       T4(同T1回正)→云台回正→交还循迹。
  * 每次动作(转/直行)间统一停稳 CAR_OBST_STOP_TICKS。 */
-#define CAR_OBST_TRIGGER_CM          20   /* 前端触发阈值(cm) */
+#define CAR_OBST_TRIGGER_CM          22   /* 前端触发阈值(cm) */
 /* 模式C按“行驶圈向”取避障绕向：0=顺圈(A→B→C→D→A)用CAR_OBST_C_DEFAULT_TURN；
  * 1=逆圈(反向行驶)避障转弯取镜面反射方向。上电默认值；运行中用 K3 短按切换
  * (在C模式下)，OLED Track 页显示 CW/CCW。 */
 #define CAR_OBST_C_ROUTE_DIR         0
 #define CAR_OBST_C_DEFAULT_TURN     CAR_TURN_LEFT   /* 模式C(自由避障)默认绕向: 左绕用右超声 */
+/* 模式C避障 90°固定转弯按行驶圈向各用一套独立双电机编码器目标
+ * (不再与A/B地图转弯共用)：
+ * - CW (顺圈 Obst_RouteDir==0)：用 CAR_OBST_CW_* 组；
+ * - CCW(逆圈 Obst_RouteDir==1)：用 CAR_OBST_CCW_* 组。
+ * 两组初值当前相同，实车分别标定：CW组/CCW组 转向角度有偏差只调对应组。 */
+#define CAR_OBST_CW_LEFT_TURN_LEFT_TARGET    (-400)  /* 顺圈左转：左轮目标 */
+#define CAR_OBST_CW_LEFT_TURN_RIGHT_TARGET   690     /* 顺圈左转：右轮目标 */
+#define CAR_OBST_CW_RIGHT_TURN_LEFT_TARGET   400     /* 顺圈右转：左轮目标 */
+#define CAR_OBST_CW_RIGHT_TURN_RIGHT_TARGET  (-690)  /* 顺圈右转：右轮目标 */
+#define CAR_OBST_CCW_LEFT_TURN_LEFT_TARGET   (-400)  /* 逆圈左转：左轮目标 */
+#define CAR_OBST_CCW_LEFT_TURN_RIGHT_TARGET  690     /* 逆圈左转：右轮目标 */
+#define CAR_OBST_CCW_RIGHT_TURN_LEFT_TARGET  400     /* 逆圈右转：左轮目标 */
+#define CAR_OBST_CCW_RIGHT_TURN_RIGHT_TARGET (-690)  /* 逆圈右转：右轮目标 */
 #define CAR_OBST_CONFIRM_TIMES       1  /* 前端连续几次采样<阈值才触发 */
 #define CAR_OBST_STOP_TICKS          30   /* 统一停稳窗口(约0.5s) */
 #define CAR_OBST_DRIVE_PWM           30   /* 各直行段速度 */
 /* C盲走三段固定直行(单位=OLED AVG,70计数≈1cm)——用户按实车标定改:
  * D1第一次转后让开木块的距离; D2沿原方向越过木块; D3转回线方向后见线上限 */
 #define CAR_OBST_D1_AVG              1200
-#define CAR_OBST_D2_AVG              2000
-#define CAR_OBST_D3_AVG              2000
+#define CAR_OBST_D2_AVG              1920
+#define CAR_OBST_D3_AVG              1300
 #define CAR_OBST_G_MAX_TICKS         400   /* 单盲走直行段超时(约4s) */
 #define CAR_OBST_LINE_CONFIRM        2    /* 灰度见线确认帧数 */
-#define CAR_OBST_LINE_MIN            4    /* 灰度几路亮=重新见线 */
+#define CAR_OBST_LINE_MIN            3    /* 灰度几路亮=重新见线 */
 #define CAR_OBST_SERVO_FRONT         90   /* 舵机角度=正前(用户确认90°朝前) */
 #define CAR_OBST_SERVO_RIGHT         0  /* 舵机角度=朝右(实测标定) */
 #define CAR_OBST_SERVO_LEFT          180    /* 舵机角度=朝左(实测标定) */
@@ -890,6 +903,39 @@ static void Car_LoadModeBTurnTargets(uint8_t Direction)
 	}
 }
 
+/* 模式C避障固定转弯专用：按行驶圈向选一套目标(CW/CCW各自独立标定) */
+static void Car_LoadObstacleTurnTargets(uint8_t Direction)
+{
+	if (Obst_RouteDir == 0)
+	{
+		/* CW 顺圈组 */
+		if (Direction == CAR_TURN_LEFT)
+		{
+			Turn_Left_Encoder_Target = CAR_OBST_CW_LEFT_TURN_LEFT_TARGET;
+			Turn_Right_Encoder_Target = CAR_OBST_CW_LEFT_TURN_RIGHT_TARGET;
+		}
+		else
+		{
+			Turn_Left_Encoder_Target = CAR_OBST_CW_RIGHT_TURN_LEFT_TARGET;
+			Turn_Right_Encoder_Target = CAR_OBST_CW_RIGHT_TURN_RIGHT_TARGET;
+		}
+	}
+	else
+	{
+		/* CCW 逆圈组 */
+		if (Direction == CAR_TURN_LEFT)
+		{
+			Turn_Left_Encoder_Target = CAR_OBST_CCW_LEFT_TURN_LEFT_TARGET;
+			Turn_Right_Encoder_Target = CAR_OBST_CCW_LEFT_TURN_RIGHT_TARGET;
+		}
+		else
+		{
+			Turn_Left_Encoder_Target = CAR_OBST_CCW_RIGHT_TURN_LEFT_TARGET;
+			Turn_Right_Encoder_Target = CAR_OBST_CCW_RIGHT_TURN_RIGHT_TARGET;
+		}
+	}
+}
+
 static void Car_SetTurnPWM(uint8_t Direction, uint8_t Speed)
 {
 	int16_t LeftPWM;
@@ -1602,7 +1648,7 @@ static void Obst_StartPivot(uint8_t Direction)
 	Turn_Right_Encoder_Count = 0;
 	Turn_Left_Encoder_Reached = 0;
 	Turn_Right_Encoder_Reached = 0;
-	Car_LoadTurnEncoderTargets(Direction);
+	Car_LoadObstacleTurnTargets(Direction);
 	Route_TurnEndsSegment = 0;
 }
 
