@@ -1,5 +1,32 @@
 # Codex ChangeLog
 
+## 2026-08-24 - MODE C: obstacle 90° turns use separate CW/CCW encoder targets
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+- `Codex_ChangeLog.md`
+
+What changed:
+- Mode C obstacle-bypass 90° turns no longer reuse the generic map-turn
+  targets. Two independent groups are selected at runtime by `Obst_RouteDir`
+  (0=CW clockwise, 1=CCW counter-clockwise):
+  - CW group: `CAR_OBST_CW_LEFT/RIGHT_TURN_LEFT/RIGHT_TARGET`
+  - CCW group: `CAR_OBST_CCW_LEFT/RIGHT_TURN_LEFT/RIGHT_TARGET`
+- New loader `Car_LoadObstacleTurnTargets(Direction)`; `Obst_StartPivot`
+  now calls it instead of `Car_LoadTurnEncoderTargets`, so every bypass
+  pivot (T1..T4) uses the group matching the current lap direction.
+- Both groups initialized to the previous generic values (-400/690/400/-690);
+  user calibrates each group separately on the car.
+- This commit also carries the user's in-Keil tuning: CAR_MB_* blind-turn
+  targets -420/700/420/-700, CAR_OBST_TRIGGER_CM=22, D2_AVG=1920,
+  D3_AVG=1300, LINE_MIN=3.
+
+Build/verification:
+- Reviewed (UTF-8 paren/brace 855/855, 341/341 balanced); ARMCC build to be
+  confirmed by the user in Keil.
+
 ## 2026-08-24 - MODE A: first-lap result page (per-segment + total + blocks), frozen OLED
 
 Branch: `feature/wall-follow-v1`
