@@ -1,5 +1,36 @@
 # Codex ChangeLog
 
+## 2026-08-24 - MODE B: blind-run distance and 90° turns split per lap family (CCW/CW)
+
+Branch: `feature/wall-follow-v1`
+
+Files changed:
+- `User/main.c`
+- `Codex_ChangeLog.md`
+
+What changed:
+- Mode B blind navigation now distinguishes the two lap families:
+  - Family A (counter-clockwise in user terms, route modes 0-3:
+    A_TO_B/B_TO_C/C_TO_D/D_TO_A, i.e. travelling A→B→C→D→A, Q special
+    segment D→A) uses the `CAR_MB_CCW_*` values (previous single set:
+    blind-to-Q distance 2000, turn targets -420/700/420/-700).
+  - Family B (clockwise, route modes 4-7: B_TO_A/A_TO_D/D_TO_C/C_TO_B,
+    Q special segment A→D) uses the new `CAR_MB_CW_*` values, initialized
+    to the same numbers and to be calibrated on the car.
+- `Car_LoadModeBTurnTargets` picks the target group by
+  `Route_SelectedMode < CAR_ROUTE_MODE_COUNT/2` (0-3 → CCW group, 4-7 →
+  CW group).
+- The blind drive to Q in `Car_RunModeBNav` uses the matching per-family
+  distance (`CAR_MB_CCW_Q_FORWARD_COUNT` / `CAR_MB_CW_Q_FORWARD_COUNT`).
+- Also committed the user's in-Keil tuning carried in the working tree:
+  CAR_OBST_CW_* turn targets 390/660/390/-660 and the insurance window
+  tweaks (InsAdVals 3800/3720, reverse-normal 7200).
+
+Build/verification:
+- Reviewed (UTF-8 paren/brace 872/872, 345/345 balanced); ARMCC build to be
+  confirmed by the user in Keil.
+
+
 ## 2026-08-24 - MODE C: obstacle 90° turns use separate CW/CCW encoder targets
 
 Branch: `feature/wall-follow-v1`
