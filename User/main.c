@@ -81,14 +81,25 @@
 #define CAR_ROUTE_AD_T_COUNT         5
 /* 可调窗口：其他普通路段到达目标点需要经过的 T 数量。 */
 #define CAR_ROUTE_NORMAL_T_COUNT     1
+/* ===== 模式B盲行参数：按行驶族(顺/逆)各一套 =====
+ * 族A(逆时针，route mode 0-3：A_TO_B/B_TO_C/C_TO_D/D_TO_A，
+ *     即 A→B→C→D→A 方向，Q 特殊段为 D→A)：用 *_CCW 组；
+ * 族B(顺时针，route mode 4-7：B_TO_A/A_TO_D/D_TO_C/C_TO_B，
+ *     Q 特殊段为 A→D)：用 *_CW 组。
+ * 两组初值当前相同，实车分别标定，改各自的宏即可。 */
 /* 可调窗口：模式B中，第一个特殊 T 后直行到 Q 点附近的编码器平均累计值，单位和 OLED 的 AVG 一样。 */
-#define CAR_MODE_B_Q_FORWARD_COUNT   2000
-/* 模式B盲走阶段的90°转使用独立的一套左右轮编码器目标(与普通循迹转弯分开标定)：
+#define CAR_MB_CCW_Q_FORWARD_COUNT   2000    /* 族A(逆,route 0-3) 盲行到Q距离 */
+#define CAR_MB_CW_Q_FORWARD_COUNT    2000    /* 族B(顺,route 4-7) 盲行到Q距离 */
+/* 模式B盲走阶段的90°转按族分两套左右轮编码器目标(与普通循迹转弯分开标定)：
  * 盲走去Q转向、重新见线回正等都在无黑线段，角度标定与地图90°不同。 */
-#define CAR_MB_LEFT_TURN_LEFT_TARGET   (-420)  /* B盲走：左转时左轮目标 */
-#define CAR_MB_LEFT_TURN_RIGHT_TARGET  700     /* B盲走：左转时右轮目标 */
-#define CAR_MB_RIGHT_TURN_LEFT_TARGET  420     /* B盲走：右转时左轮目标 */
-#define CAR_MB_RIGHT_TURN_RIGHT_TARGET (-700)  /* B盲走：右转时右轮目标 */
+#define CAR_MB_CCW_LEFT_TURN_LEFT_TARGET   (-420)  /* 族A逆左转：左轮目标 */
+#define CAR_MB_CCW_LEFT_TURN_RIGHT_TARGET  700     /* 族A逆左转：右轮目标 */
+#define CAR_MB_CCW_RIGHT_TURN_LEFT_TARGET  420     /* 族A逆右转：左轮目标 */
+#define CAR_MB_CCW_RIGHT_TURN_RIGHT_TARGET (-700)  /* 族A逆右转：右轮目标 */
+#define CAR_MB_CW_LEFT_TURN_LEFT_TARGET    (-420)  /* 族B顺左转：左轮目标 */
+#define CAR_MB_CW_LEFT_TURN_RIGHT_TARGET   700     /* 族B顺左转：右轮目标 */
+#define CAR_MB_CW_RIGHT_TURN_LEFT_TARGET   420     /* 族B顺右转：左轮目标 */
+#define CAR_MB_CW_RIGHT_TURN_RIGHT_TARGET  (-700)  /* 族B顺右转：右轮目标 */
 /* 可调窗口：模式B中到 Q/O 点后的停稳时间，每个周期约 10ms，50=约0.5秒。 */
 #define CAR_MODE_B_STOP_TICKS        50
 /* 可调窗口：模式B中，无黑线直行后看到多少路灰度为高电平才认为重新遇到黑线。 */
@@ -128,10 +139,10 @@
  * - CW (顺圈 Obst_RouteDir==0)：用 CAR_OBST_CW_* 组；
  * - CCW(逆圈 Obst_RouteDir==1)：用 CAR_OBST_CCW_* 组。
  * 两组初值当前相同，实车分别标定：CW组/CCW组 转向角度有偏差只调对应组。 */
-#define CAR_OBST_CW_LEFT_TURN_LEFT_TARGET    (-400)  /* 顺圈左转：左轮目标 */
-#define CAR_OBST_CW_LEFT_TURN_RIGHT_TARGET   690     /* 顺圈左转：右轮目标 */
-#define CAR_OBST_CW_RIGHT_TURN_LEFT_TARGET   400     /* 顺圈右转：左轮目标 */
-#define CAR_OBST_CW_RIGHT_TURN_RIGHT_TARGET  (-690)  /* 顺圈右转：右轮目标 */
+#define CAR_OBST_CW_LEFT_TURN_LEFT_TARGET    (-390)  /* 顺圈左转：左轮目标 */
+#define CAR_OBST_CW_LEFT_TURN_RIGHT_TARGET   660     /* 顺圈左转：右轮目标 */
+#define CAR_OBST_CW_RIGHT_TURN_LEFT_TARGET   390     /* 顺圈右转：左轮目标 */
+#define CAR_OBST_CW_RIGHT_TURN_RIGHT_TARGET  (-660)  /* 顺圈右转：右轮目标 */
 #define CAR_OBST_CCW_LEFT_TURN_LEFT_TARGET   (-400)  /* 逆圈左转：左轮目标 */
 #define CAR_OBST_CCW_LEFT_TURN_RIGHT_TARGET  690     /* 逆圈左转：右轮目标 */
 #define CAR_OBST_CCW_RIGHT_TURN_LEFT_TARGET  400     /* 逆圈右转：左轮目标 */
@@ -888,18 +899,38 @@ static void Car_LoadTurnEncoderTargets(uint8_t Direction)
 	}
 }
 
-/* 模式B盲走阶段专用：独立一套90°转的左右轮目标 */
+/* 模式B盲走阶段专用：按行驶族各一套90°转左右轮目标。
+ * route mode 0-3(族A, A_TO_B等, D-A特殊段)=逆→用 CCW 组；
+ * route mode 4-7(族B, B_TO_A等, A-D特殊段)=顺→用 CW 组。 */
 static void Car_LoadModeBTurnTargets(uint8_t Direction)
 {
-	if (Direction == CAR_TURN_LEFT)
+	if (Route_SelectedMode < (CAR_ROUTE_MODE_COUNT / 2u))
 	{
-		Turn_Left_Encoder_Target = CAR_MB_LEFT_TURN_LEFT_TARGET;
-		Turn_Right_Encoder_Target = CAR_MB_LEFT_TURN_RIGHT_TARGET;
+		/* 族A(逆,route 0-3) */
+		if (Direction == CAR_TURN_LEFT)
+		{
+			Turn_Left_Encoder_Target = CAR_MB_CCW_LEFT_TURN_LEFT_TARGET;
+			Turn_Right_Encoder_Target = CAR_MB_CCW_LEFT_TURN_RIGHT_TARGET;
+		}
+		else
+		{
+			Turn_Left_Encoder_Target = CAR_MB_CCW_RIGHT_TURN_LEFT_TARGET;
+			Turn_Right_Encoder_Target = CAR_MB_CCW_RIGHT_TURN_RIGHT_TARGET;
+		}
 	}
 	else
 	{
-		Turn_Left_Encoder_Target = CAR_MB_RIGHT_TURN_LEFT_TARGET;
-		Turn_Right_Encoder_Target = CAR_MB_RIGHT_TURN_RIGHT_TARGET;
+		/* 族B(顺,route 4-7) */
+		if (Direction == CAR_TURN_LEFT)
+		{
+			Turn_Left_Encoder_Target = CAR_MB_CW_LEFT_TURN_LEFT_TARGET;
+			Turn_Right_Encoder_Target = CAR_MB_CW_LEFT_TURN_RIGHT_TARGET;
+		}
+		else
+		{
+			Turn_Left_Encoder_Target = CAR_MB_CW_RIGHT_TURN_LEFT_TARGET;
+			Turn_Right_Encoder_Target = CAR_MB_CW_RIGHT_TURN_RIGHT_TARGET;
+		}
 	}
 }
 
@@ -1188,7 +1219,7 @@ static uint8_t Ins_IsFwdNormalStep(const CAR_ROUTE_STEP *S)
  *   1710 / 3720 / 3420 / 3420 / 1710 */
 static uint32_t Ins_GetValue(const CAR_ROUTE_STEP *S, uint8_t Idx)
 {
-	static const uint32_t InsAdVals[5] = {1968UL, 3520UL, 3820UL, 3820UL, 1968UL};
+	static const uint32_t InsAdVals[5] = {1968UL, 3520UL, 3800UL, 3720UL, 1968UL};
 	static const uint32_t InsDaVals[5] = {1710UL, 3820UL, 3520UL, 3520UL, 1710UL};
 
 	if (Ins_IsFwdNormalStep(S))
@@ -1199,7 +1230,7 @@ static uint32_t Ins_GetValue(const CAR_ROUTE_STEP *S, uint8_t Idx)
 	    ((S->From == 'C') && (S->To == 'B')) ||
 	    ((S->From == 'D') && (S->To == 'C')))
 	{
-		return (Idx == 0) ? 7298UL : 0UL;
+		return (Idx == 0) ? 7200UL : 0UL;
 	}
 	if ((S->From == 'A') && (S->To == 'D'))
 	{
@@ -1387,7 +1418,10 @@ static void Car_RunModeBNav(void)
 	if (ModeB_State == CAR_MODE_B_STATE_FORWARD_TO_Q)
 	{
 		Line_Mode = 'Q';
-		if (Car_ModeBRunEncoderStraight(1, CAR_MODE_B_Q_FORWARD_COUNT))
+		/* 盲行到Q距离按行驶族(顺/逆)取各自标定值 */
+		if (Car_ModeBRunEncoderStraight(1, (Route_SelectedMode < (CAR_ROUTE_MODE_COUNT / 2u))
+		                                        ? CAR_MB_CCW_Q_FORWARD_COUNT
+		                                        : CAR_MB_CW_Q_FORWARD_COUNT))
 		{
 			Car_Stop();
 			ModeB_Stop_Tick = CAR_MODE_B_STOP_TICKS;
